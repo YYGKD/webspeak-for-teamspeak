@@ -3957,9 +3957,29 @@ function stopWhisperTalk(): void {
  * 弹性列之后总量正好等于可用高度；消息多时由消息列表内部滚动。
  */
 @media (min-width: 741px) {
-  .app-shell .workspace-content { height: 100%; display: flex; flex-direction: column; }
-  .app-shell .chat-panel { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
-  .app-shell .message-list { flex: 1 1 auto; min-height: 0; max-height: none; }
+  /*
+   * 底部内边距原来是 64px，聊天面板下面就是那块"空着的地方"。收到 16px，
+   * 把空间还给聊天区（输入框往下贴）。
+   */
+  .app-shell .workspace-content { height: 100%; display: flex; flex-direction: column; padding-bottom: 16px; }
+  /*
+   * 上方两段固定不收缩。否则聊天面板的 flex-basis 由内容决定，消息一多就产生
+   * 收缩额度，把房间信息和语音区压扁甚至压没。
+   */
+  .app-shell .workspace-content > .room-hero,
+  .app-shell .workspace-content > .voice-section { flex: 0 0 auto; }
+  /*
+   * 聊天面板只取剩余空间（flex-basis: 0），不靠内容决定高度：
+   * 空聊天时也一直撑到底部，消息多时由消息列表内部滚动。
+   */
+  .app-shell .chat-panel { flex: 1 1 0%; min-height: 0; display: flex; flex-direction: column; }
+  /*
+   * 面板里除消息列表外的子项一律不收缩 —— 否则标签行会被压成几像素
+   * （实测 chat-tabs 被压到 3.4px），看起来就像"上面的内容消失了"。
+   */
+  .app-shell .chat-panel > *:not(.message-list) { flex: 0 0 auto; }
+  /* min-height 保证"暂无消息"的空状态不会被压扁到出现滚动条 */
+  .app-shell .message-list { flex: 1 1 auto; min-height: 150px; max-height: none; }
 }
 
 /*
