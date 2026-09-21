@@ -1386,7 +1386,10 @@ async function parseResponse(response: Response) { const value = await response.
    stays readable. Compensate viewport heights for that zoom; otherwise a
    2K viewport becomes a 1920px-tall admin shell and clips its lower cards. */
 @media(min-width:851px){
-  :global(html),:global(body),:global(#app){height:calc(100dvh / var(--ui-scale));max-height:calc(100dvh / var(--ui-scale))}
+  /* html/body 不在 #app 的 zoom 之内，必须是完整视口高度；只有 zoom 内的 #app
+     需要除以缩放，否则文档比视口矮一截，#app 会溢出并被挤成负偏移。 */
+  :global(html),:global(body){height:100dvh;max-height:100dvh}
+  :global(#app){height:calc(100dvh / var(--ui-scale));max-height:calc(100dvh / var(--ui-scale))}
   .admin-root,.admin-shell,.admin-sidebar{height:calc(100dvh / var(--ui-scale));min-height:calc(100dvh / var(--ui-scale));max-height:calc(100dvh / var(--ui-scale))}
   .admin-main{height:100%;min-height:0}
 }

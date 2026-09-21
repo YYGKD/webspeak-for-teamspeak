@@ -3276,7 +3276,8 @@ function stopWhisperTalk(): void {
 
 /* Keep the connected workspace sized to the browser viewport and let the
    workspace and member tree own their scroll areas when the window shrinks. */
-:global(html), :global(body), :global(#app) { width: 100%; height: var(--app-vh); min-height: 0; max-height: var(--app-vh); }
+:global(html), :global(body) { width: 100%; height: 100dvh; min-height: 0; max-height: 100dvh; }
+:global(#app) { width: 100%; height: var(--app-vh); min-height: 0; max-height: var(--app-vh); }
 :global(body) { overflow-x: hidden; overflow-y: auto; }
 .web-client { height: var(--app-vh); min-height: 0; max-height: var(--app-vh); }
 .web-client { overflow: hidden; }
@@ -3539,7 +3540,8 @@ function stopWhisperTalk(): void {
 
 /* The document itself never becomes the scroll surface. Each view owns its
    content scroll area so headers, controls and mobile navigation stay fixed. */
-:global(html), :global(body), :global(#app) { width: 100%; height: var(--app-vh); min-height: 0; max-height: var(--app-vh); overflow: hidden; }
+:global(html), :global(body) { width: 100%; height: 100dvh; min-height: 0; max-height: 100dvh; overflow: hidden; }
+:global(#app) { width: 100%; height: var(--app-vh); min-height: 0; max-height: var(--app-vh); overflow: hidden; }
 .join-page { height: var(--app-vh); min-height: 0; overflow: hidden; }
 .join-content { min-height: 0; }
 
@@ -3946,4 +3948,24 @@ function stopWhisperTalk(): void {
  */
 .app-shell .workspace-scroll { scrollbar-width: none; scrollbar-gutter: auto; }
 .app-shell .workspace-scroll::-webkit-scrollbar { width: 0; height: 0; display: none; }
+
+/*
+ * 桌面端中间工作区不滚动：内容按可用高度排版，聊天消息列表吸收剩余空间。
+ *
+ * 之前各段是固定高度（hero 209 + 语音区 + 聊天面板 418…），合计比可用高度多
+ * 13–17px（1080p/1440p 实测），于是挤出一条滚动条、最后一行显示不全。改成
+ * 弹性列之后总量正好等于可用高度；消息多时由消息列表内部滚动。
+ */
+@media (min-width: 741px) {
+  .app-shell .workspace-content { height: 100%; display: flex; flex-direction: column; }
+  .app-shell .chat-panel { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+  .app-shell .message-list { flex: 1 1 auto; min-height: 0; max-height: none; }
+}
+
+/*
+ * 欢迎页中间段自己消化超高，避免把页脚顶出视口。
+ * 实测 1080p 下内容比可用高度多 16px，而 .join-page 是 overflow:hidden，
+ * 被顶出去的部分直接看不见。
+ */
+.join-page .join-content { min-height: 0; overflow-y: auto; }
 </style>
