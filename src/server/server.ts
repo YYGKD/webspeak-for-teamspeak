@@ -12,6 +12,8 @@ import { AdminSessionStore } from "../admin/admin-session.js";
 import { resolveSafeOpenTarget } from "../security/open-target-policy.js";
 import { identityFromString } from "@echosixhiya/teamspeak-client";
 import { JoinRateLimiter } from "./join-rate-limit.js";
+import { resolveIceServers } from "./webrtc-audio.js";
+import { MAX_TEAMSPEAK_NICKNAME_CHARACTERS, MIN_TEAMSPEAK_NICKNAME_CHARACTERS } from "../errors.js";
 import type { ConfiguredAccelerationRelay } from "./acceleration-relay.js";
 
 export interface WebServerOptions {
@@ -65,6 +67,9 @@ export function createWebServer(options: WebServerOptions): WebServer {
       ...options.adminService.getPublicConfig(),
       accelerationAvailable: acceleration.length > 0,
       accelerationRelays: acceleration.map((relay) => ({ id: relay.id, name: relay.name })),
+      // 浏览器侧的 WebRTC ICE 配置由服务端下发，避免前端硬编码部署相关的地址。
+      // resolveIceServers 会为本次下发签发新鲜的 TURN 临时凭据（见 webrtc-audio.ts）。
+      iceServers: resolveIceServers(),
     });
   });
 
@@ -83,7 +88,11 @@ export function createWebServer(options: WebServerOptions): WebServer {
       return;
     }
     const body = isRecord(request.body) ? request.body : {};
-    const nickname = typeof body.nickname === "string" ? body.nickname.trim().slice(0, 30) : "";
+    // 按**码点**截断到上限，不用 String.prototype.slice —— 后者按 UTF-16 单元切，
+    // 会把 emoji 之类的代理对切一半，产出一个非法字符再发给 TeamSpeak。
+    const nickname = typeof body.nickname === "string"
+      ? [...body.nickname.trim()].slice(0, MAX_TEAMSPEAK_NICKNAME_CHARACTERS).join("")
+      : "";
     const requestedChannel = typeof body.channel === "string" ? body.channel.trim().slice(0, 100) : "";
     const inviteToken = typeof body.invite === "string" ? body.invite.trim().slice(0, 128) : "";
     const requestedIdentity = typeof body.identity === "string" && body.identity.length <= 8192 ? body.identity : "";
@@ -96,7 +105,11 @@ export function createWebServer(options: WebServerOptions): WebServer {
         // A stale/corrupt local identity must not block a normal ephemeral join.
       }
     }
-    if (!nickname) {
+    // 昵称长度在这里挡住，别让它走到 TS 握手 —— TS3 对不合规的 clientinit 参数是静默
+    // 丢弃，网关只能等满 15 秒握手超时，用户收到的是「连接超时，请检查网络」。
+    // 前端也有一份同样的校验（见 useVoiceWebSocket.ts），这里是服务端的兜底。
+    // 只查下限：上限已经由上面的截断保证，再查一遍是死代码。
+    if ([...nickname].length < MIN_TEAMSPEAK_NICKNAME_CHARACTERS) {
       response.status(400).json({ ok: false, code: "INVALID_NICKNAME" });
       return;
     }
@@ -192,8 +205,25 @@ export function createWebServer(options: WebServerOptions): WebServer {
     async stop(): Promise<void> {
       await voiceBridge.shutdown();
       adminSessions.clear();
+      // server.close() 的回调只在**所有**连接关闭后才触发。反向代理 / SSH 隧道
+      // 会长期持有 keep-alive 长连接（实测阿里云上春川2 的隧道常驻两条），
+      // 回调因此永不触发、进程永不退出 —— 生产上表现为 systemd 等满
+      // TimeoutStopSec(90s) 后 SIGKILL。先关空闲连接，再给一个兜底上限强制关闭。
       return new Promise((resolve) => {
-        server.close(() => resolve());
+        let settled = false;
+        const finish = (): void => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(() => {
+          server.closeAllConnections?.();
+          finish();
+        }, 2000);
+        timer.unref?.();
+        server.close(finish);
+        server.closeIdleConnections?.();
       });
     },
   };

@@ -72,7 +72,17 @@ async function main() {
   // Graceful shutdown
   const shutdown = async (signal: string) => {
     logger.info({ signal }, "Shutting down");
-    await webServer.stop();
+    // 兜底上限：关闭流程里的每一步都可能因为"回调只在连接全关后才触发"而挂住
+    // （反向代理 / SSH 隧道的 keep-alive 长连接、残留的 WS 客户端）。
+    // 宁可少等几秒，也不能让 systemd 等满 TimeoutStopSec（本机是 90s）再 SIGKILL
+    // —— 那会让重启期间服务长时间不可用，且日志里只留下一条 timeout 记录。
+    await Promise.race([
+      webServer.stop(),
+      new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 5_000);
+        timer.unref();
+      }),
+    ]);
     database.close();
     process.exit(0);
   };

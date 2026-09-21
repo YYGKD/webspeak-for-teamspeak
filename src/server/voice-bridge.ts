@@ -1,6 +1,5 @@
 import { WebSocketServer, WebSocket } from "ws";
 import type { IncomingMessage, Server } from "node:http";
-import { createRequire } from "node:module";
 import { isIP } from "node:net";
 import { identityFromString } from "@echosixhiya/teamspeak-client";
 import { DirectorySynchronizer } from "./directory-sync.js";
@@ -16,11 +15,9 @@ import { isRecoverable, reconnectDelayMs, reconnectWindowOpen } from "./reconnec
 import { WebRtcAudioSession, type WebRtcAudioOptions, type WebRtcAudioStats, type WebRtcSessionDescription } from "./webrtc-audio.js";
 import { pingTeamSpeakSession } from "./network-probe.js";
 import type { AccelerationRelayOptions, ConfiguredAccelerationRelay } from "./acceleration-relay.js";
-
-const require = createRequire(import.meta.url);
-const { OpusEncoder } = require("@discordjs/opus") as {
-  OpusEncoder: new (sampleRate: number, channels: number) => { encode(pcm: Buffer): Buffer };
-};
+import { createOpusEncoder } from "./opus-codec.js";
+import { SpeakerRegistry } from "./speaker-registry.js";
+import { resolveWebRtcSlotCount } from "./webrtc-config.js";
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const MOVE_PERMISSION_PROBE_INTERVAL_MS = 30_000;
@@ -95,16 +92,6 @@ export interface AudioFlowStats {
   webrtcEgressRtpFirstAt: number | null;
   webrtcEgressRtpLastAt: number | null;
   webrtcEgressRtpMaxGapMs: number;
-  webrtcQueuePeakFrames: number;
-  webrtcQueueDroppedFrames: number;
-  webrtcQueueUnderrunTicks: number;
-  webrtcPacerLateTicks: number;
-  webrtcQueueCurrentFrames: number;
-  webrtcIngressQuietFrames: number;
-  webrtcIngressDecodeErrors: number;
-  webrtcDownlinkDecodedFrames: number;
-  webrtcDownlinkDecodeErrors: number;
-  webrtcDownlinkShortFrames: number;
 }
 
 interface ChannelMember {
@@ -151,6 +138,10 @@ interface WebClientEntry {
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   audio: AudioFlowStats;
   webrtc: WebRtcAudioSession | null;
+  /** SFU：说话人 → slot 的分配器与 RTP 生成器（仅 WebRTC 路径使用）。 */
+  registry: SpeakerRegistry;
+  /** 已下发给浏览器的 slot → clientId 映射，用于检测归属变化。 */
+  slotOwner: Map<number, number>;
   lastLatencyProbeAt: number;
   canMoveClients: boolean;
   movePermissionProbeTimer: ReturnType<typeof setInterval> | null;
@@ -272,13 +263,15 @@ export class VoiceBridge {
         reconnectTimer: null,
         audio: createAudioFlowStats(),
         webrtc: null,
+        registry: new SpeakerRegistry(resolveWebRtcSlotCount()),
+        slotOwner: new Map(),
         lastLatencyProbeAt: 0,
         canMoveClients: false,
         movePermissionProbeTimer: null,
       };
       this.entries.set(entryId, entry!);
       try {
-        entry!.opusEncoder = new OpusEncoder(48000, 1);
+        entry!.opusEncoder = createOpusEncoder();
       } catch (error: unknown) {
         this.logger.error({ err: error, entryId }, "Could not create Opus encoder");
         void this.teardown(entryId, "teamSpeak-connect-failed");
@@ -436,6 +429,8 @@ export class VoiceBridge {
           whisperTargetIds: [...entry!.whisperTargetIds],
           whisperActive: entry!.whisperActive,
           webrtcAvailable: this.getWebRtcOptions()?.enabled === true,
+          // SFU 的 slot 数必须与浏览器一致，否则 offer 的 m-line 数量对不上。
+          webrtcSlotCount: resolveWebRtcSlotCount(),
           accelerated: Boolean(entry!.acceleration),
           canMoveClients: entry!.canMoveClients,
           ...(entry!.rememberIdentity ? { identity: tsClient.getIdentityString() } : {}),
@@ -639,7 +634,9 @@ export class VoiceBridge {
       tsClient.on("clientLeave", (info) => {
         const wasKnown = entry!.members.has(info.id);
         const leavingMember = entry!.members.get(info.id);
-        entry!.webrtc?.setMemberVolume(info.id, 1);
+        // SFU：成员离开就回收其 slot，并让浏览器更新 slot → 成员的映射。
+        entry!.registry.release(info.id);
+        syncWebRtcSlots();
         directory.applyClientLeave(info.id);
         refreshDirectory();
         if (tsReady && initialStateSent && wasKnown) {
@@ -667,6 +664,38 @@ export class VoiceBridge {
         if (tsReady && initialStateSent) sendJson({ type: "channelList", channels: entry!.channelTree });
       });
 
+      /**
+       * SFU：把 registry 的 slot 归属同步到 sender 与浏览器。
+       *
+       * 只在归属**真正变化**时重定位序号并下发新映射 —— 对未换源的 sender
+       * 调用 replaceRTP 会让它把上一个序号再发一次。
+       */
+      const syncWebRtcSlots = (): void => {
+        const current = entry;
+        const webRtc = current?.webrtc;
+        if (!current || !webRtc) return;
+        const snapshot = current.registry.snapshot();
+        let changed = false;
+        const seen = new Set<number>();
+        for (const [slotText, clientId] of Object.entries(snapshot)) {
+          const slot = Number(slotText);
+          seen.add(slot);
+          if (current.slotOwner.get(slot) === clientId) continue;
+          current.slotOwner.set(slot, clientId);
+          const stream = current.registry.streamOf(clientId);
+          if (stream) webRtc.assignSlot(slot, stream);
+          changed = true;
+        }
+        for (const slot of [...current.slotOwner.keys()]) {
+          if (seen.has(slot)) continue;
+          current.slotOwner.delete(slot);
+          changed = true;
+        }
+        if (!changed) return;
+        webRtc.setSlotStats(current.registry.size);
+        sendJson({ type: "speakerMap", slots: snapshot });
+      };
+
       tsClient.on("voiceData", (data: TSVoiceData) => {
         const receivedAt = Date.now();
         if (entry!.audio.tsReceiveLastAt !== null) entry!.audio.tsReceiveMaxGapMs = Math.max(entry!.audio.tsReceiveMaxGapMs, receivedAt - entry!.audio.tsReceiveLastAt);
@@ -675,7 +704,6 @@ export class VoiceBridge {
         entry!.audio.tsReceiveFrames++;
         if (ws.readyState !== WebSocket.OPEN || data.clientId === selfId) return;
         const webRtc = entry!.webrtc;
-        webRtc?.pushTeamSpeakVoice(data);
         const now = receivedAt;
         if (entry!.audio.egressLastAt !== null) entry!.audio.egressMaxGapMs = Math.max(entry!.audio.egressMaxGapMs, now - entry!.audio.egressLastAt);
         entry!.audio.egressFirstAt ??= now;
@@ -687,6 +715,11 @@ export class VoiceBridge {
         // reliable WebSocket, otherwise the browser plays two copies and
         // the TCP path can still accumulate stale audio behind the peer.
         if (webRtc) {
+          // SFU：一帧只打一次 RTP，再交给该说话人所在 slot 的 sender 转发。
+          // 编解码全部在两端完成，这里没有采样级处理。
+          const result = entry!.registry.ingest(data.clientId, data.data);
+          syncWebRtcSlots();
+          if (result) webRtc.forward(result.slot, result.rtp);
           entry!.audio.egressFrames++;
           return;
         }
@@ -883,9 +916,15 @@ export class VoiceBridge {
     const wss = this.wss;
     this.wss = null;
     if (!wss) return;
-    await new Promise<void>((resolve) => {
+    // ws 的语义：只要还有客户端连着，close 的回调就不会触发
+    // （实测：留一个客户端不 terminate，回调 3s 内不触发）。
+    // 会话拆解之后仍可能有残留 —— 半握手、或对端已断网但 TCP 还没超时。
+    // 强制断开它们，否则整个关闭流程会卡死在这里，进程永不退出。
+    const closed = new Promise<void>((resolve) => {
       try { wss.close(() => resolve()); } catch { resolve(); }
     });
+    for (const client of [...wss.clients]) client.terminate();
+    await closed;
   }
 
   getActiveCount(): number {
@@ -1028,10 +1067,13 @@ export class VoiceBridge {
     }
     const config = this.getWebRtcOptions();
     if (!config?.enabled) return;
+    // SFU：slot 数在协商时一次性谈好，之后只换归属、不重协商。
+    const slotCount = config.slotCount ?? resolveWebRtcSlotCount();
     const peer = new WebRtcAudioSession({
       connectionId: entry.id,
       ...(entry.webrtcPublicHost ? { publicHost: entry.webrtcPublicHost } : {}),
       udpPortRange: config.udpPortRange,
+      slotCount,
       logger: this.logger,
       microphoneMuted: offer.muted === true,
       accompanimentActive: offer.accompanimentActive === true,
@@ -1055,11 +1097,10 @@ export class VoiceBridge {
           // is discarded; the WebRTC peer remains independently closable.
         }
       },
-      onVoiceActivity: (clientIds) => {
-        if (entry.ws.readyState === WebSocket.OPEN) sendJson({ type: "voiceActivity", clientIds });
-      },
     });
     entry.webrtc = peer;
+    // 会话替换时重置 slot 归属，避免把上一个 peer 的映射带过来。
+    entry.slotOwner.clear();
     try {
       const answer = await peer.createAnswer({ type: offer.type, sdp: offer.sdp });
       if (entry.webrtc !== peer || entry.ws.readyState !== WebSocket.OPEN) return;
@@ -1075,6 +1116,15 @@ export class VoiceBridge {
 }
 
 function resolveWebRtcPublicHost(request: IncomingMessage): string | undefined {
+  // 反向代理部署（例如境外 443 入口反代到本机）下，Origin/Host 指向的是代理的
+  // 域名。从它们推导媒体地址会把 ICE candidate 广告成代理的 IP，媒体因此绕路到
+  // 代理机房。这种部署必须用 WEBSPEAK_MEDIA_PUBLIC_HOST 显式指定媒体地址。
+  const configured = process.env.WEBSPEAK_MEDIA_PUBLIC_HOST?.trim();
+  if (configured) {
+    const host = normalizeWebRtcHost(configured);
+    if (host) return host;
+  }
+  // 未配置时回退到原有的头推导，保持单机直连部署的向后兼容。
   const origin = firstHeader(request.headers.origin);
   const forwardedHost = firstHeader(request.headers["x-forwarded-host"]);
   const directHost = firstHeader(request.headers.host);
@@ -1353,16 +1403,6 @@ function createAudioFlowStats(): AudioFlowStats {
     webrtcEgressRtpFirstAt: null,
     webrtcEgressRtpLastAt: null,
     webrtcEgressRtpMaxGapMs: 0,
-    webrtcQueuePeakFrames: 0,
-    webrtcQueueDroppedFrames: 0,
-    webrtcQueueUnderrunTicks: 0,
-    webrtcPacerLateTicks: 0,
-    webrtcQueueCurrentFrames: 0,
-    webrtcIngressQuietFrames: 0,
-    webrtcIngressDecodeErrors: 0,
-    webrtcDownlinkDecodedFrames: 0,
-    webrtcDownlinkDecodeErrors: 0,
-    webrtcDownlinkShortFrames: 0,
   };
 }
 

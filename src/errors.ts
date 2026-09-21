@@ -1,3 +1,13 @@
+/**
+ * TeamSpeak 对客户端昵称的硬性区间：3–30 个**字符**（不是字节 —— `奶龙` 是 6 字节
+ * 但只有 2 个字符，照样被拒）。
+ *
+ * 必须两端都校验：TS3 对不合规的 clientinit 参数是**静默丢弃**（服务端日志里连一条
+ * 记录都没有），网关只能等满握手超时才报错，用户拿到的是一句把人带偏的"检查网络"。
+ */
+export const MIN_TEAMSPEAK_NICKNAME_CHARACTERS = 3;
+export const MAX_TEAMSPEAK_NICKNAME_CHARACTERS = 30;
+
 export type WebSpeakErrorCode =
   | "invalid_target"
   | "invalid_nickname"
@@ -20,6 +30,9 @@ export type WebSpeakErrorCode =
   | "invalid_parameter_size"
   | "connection_initialisation_failed"
   | "protocol_negotiation_failed"
+  // 握手的**时间预算**用完了：服务器收到了我们的请求却不回话。与 timeout 分开，
+  // 因为两者的用户提示完全不同（"昵称/限流" vs "检查网络"）。
+  | "handshake_timeout"
   | "unknown";
 
 export type ClientConnectionFailureCode =
@@ -45,6 +58,7 @@ export type ClientConnectionFailureCode =
   | "INVALID_PARAMETER"
   | "PROTOCOL_NEGOTIATION_FAILED"
   | "CONNECTION_INITIALISATION_FAILED"
+  | "HANDSHAKE_TIMEOUT"
   | "CONNECTION_FAILED";
 
 export interface TeamSpeakErrorDiagnostics {
@@ -135,6 +149,7 @@ export const WEBSPEAK_ERROR_MESSAGES: Readonly<Record<WebSpeakErrorCode, string>
   connection_refused: "TeamSpeak server refused the connection",
   connection_reset: "TeamSpeak connection was reset",
   timeout: "TeamSpeak connection timed out",
+  handshake_timeout: "TeamSpeak accepted the connection but never completed the handshake",
   authentication_failed: "TeamSpeak authentication failed",
   channel_password_required: "The TeamSpeak channel requires a password",
   identity_security_level_too_low: "This TeamSpeak identity's security level is below the server requirement",
@@ -304,6 +319,7 @@ export function clientConnectionFailureCode(error: WebSpeakError, serverPassword
     connection_refused: "CONNECTION_REFUSED",
     connection_reset: "CONNECTION_RESET",
     timeout: "TIMEOUT",
+    handshake_timeout: "HANDSHAKE_TIMEOUT",
     authentication_failed: "SERVER_PASSWORD_REQUIRED",
     channel_password_required: "CHANNEL_PASSWORD_REQUIRED",
     identity_security_level_too_low: "IDENTITY_SECURITY_LEVEL_TOO_LOW",

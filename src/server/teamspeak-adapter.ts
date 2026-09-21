@@ -5,7 +5,7 @@ import {
   type Identity,
 } from "@echosixhiya/teamspeak-client";
 import type { Logger } from "../logger.js";
-import { normalizeTeamSpeakError } from "../errors.js";
+import { WEBSPEAK_ERROR_MESSAGES, WebSpeakError, normalizeTeamSpeakError } from "../errors.js";
 import { formatTeamSpeakTarget, teamSpeakTargetKey, type TeamSpeakTarget } from "../domain/teamspeak-target.js";
 
 export type TeamSpeakProtocol = "ts3" | "ts6";
@@ -109,11 +109,24 @@ export class TeamSpeakAdapter {
   async connect(): Promise<void> {
     const cachedProtocol = this.protocolCache.get(this.target);
     this.logger.info({ target: formatTeamSpeakTarget(this.target), cachedProtocol }, "Connecting through TeamSpeak adapter");
+    const budget = AbortSignal.timeout(TEAM_SPEAK_CONNECT_TIMEOUT_MS);
+    // 只有"传输已建立"之后的超时才叫握手超时。传输层自己没连上时 budget 也可能
+    // 已经到点，那种情况是网络问题，不能算成服务器拒绝了我们。
+    let transportUp = false;
     try {
       await this.client.connect();
-      await this.client.waitConnected(AbortSignal.timeout(TEAM_SPEAK_CONNECT_TIMEOUT_MS));
+      transportUp = true;
+      await this.client.waitConnected(budget);
     } catch (error: unknown) {
       await this.client.disconnect().catch(() => undefined);
+      // budget.aborted 能精确区分两种"超时"：
+      //  · 我们的握手预算到点 —— 服务器收到了请求却不回话。TS3 对不合规的 clientinit
+      //    参数（例如昵称短于 3 个字符）就是静默丢弃，服务端日志里连一条记录都没有。
+      //  · 真正的网络超时 —— 传输层就没通。
+      // 两者的用户提示完全不同，混成一个 TIMEOUT 会让人去查网络。
+      if (transportUp && budget.aborted) {
+        throw new WebSpeakError("handshake_timeout", WEBSPEAK_ERROR_MESSAGES.handshake_timeout, true, error);
+      }
       throw normalizeTeamSpeakError(error);
     }
 

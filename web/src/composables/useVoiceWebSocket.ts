@@ -7,6 +7,58 @@ import { loadLocalPreferences, saveLocalPreferences } from "../services/local-pe
 
 const micCaptureWorkletUrl = "/mic-capture-worklet.js";
 
+/**
+ * ICE/STUN 服务器。
+ *
+ * 留空时浏览器只能给出内网 host candidate，移动网络与对称 NAT 下连不上，
+ * 会静默回退到 WS 兼容通道（TCP，延迟与抖动都差得多）。
+ * 默认值与服务端 webrtc-audio.ts 的 DEFAULT_STUN_URLS 保持一致；
+ * 生产环境建议自建 coturn 后两边一并替换。
+ */
+/**
+ * 浏览器侧的 WebRTC ICE 配置。
+ *
+ * 由服务端通过 /api/public-config 下发（见 WebClient.vue 的 loadPublicConfig），
+ * 这样 STUN 地址只在服务端配置一次，前端不硬编码部署相关的地址。
+ * 这里的默认值只在拿不到配置时兜底。
+ */
+let activeIceServers: RTCIceServer[] = [
+  { urls: "stun:stun.miwifi.com:3478" },
+  { urls: "stun:stun.chat.bilibili.com:3478" },
+];
+
+/** 由应用启动时用 /api/public-config 的结果调用。空数组会被忽略。 */
+export function setWebRtcIceServers(servers: RTCIceServer[]): void {
+  if (servers.length) activeIceServers = servers;
+}
+
+/**
+ * SFU 的默认 slot 数。服务端会在 connected 消息里下发真实值（WEBSPEAK_SFU_SLOTS），
+ * 这里只是拿不到时的兜底 —— 两边必须一致，否则 m-line 数量对不上。
+ */
+const DEFAULT_WEBRTC_SLOT_COUNT = 8;
+
+/** 本地说话指示的能量门限（与旧服务端 SPEAKER_ACTIVITY_RMS 同量级）。 */
+const SFU_ACTIVITY_RMS = 0.01;
+const SFU_ACTIVITY_INTERVAL_MS = 100;
+
+/** 一个 slot 的播放节点：source → gain → analyser → destination。 */
+interface SfuSlotNode {
+  source: MediaStreamAudioSourceNode;
+  gain: GainNode;
+  analyser: AnalyserNode;
+  buffer: Float32Array;
+  /** 该 slot 当前承载的 TeamSpeak clientId；未分配时为 null。 */
+  clientId: number | null;
+  /** 诊断用：保留流引用以便查看轨道状态。 */
+  stream: MediaStream;
+  /**
+   * 静音的 <audio> 元素，唯一作用是让 Chrome 启动这条 WebRTC 接收流。
+   * 真正出声的是 WebAudio 图。见 attachSfuSlot 里的说明。
+   */
+  element: HTMLAudioElement;
+}
+
 export interface VoiceState {
   connected: boolean;
   connecting: boolean;
@@ -101,10 +153,32 @@ export interface ServerEvent {
 }
 
 export interface LatencyProbeResult {
+  /**
+   * 整段 WebSocket 往返：浏览器发出 latencyProbe 到收到 latencyPong。
+   *
+   * 服务端在回 pong 之前会先等 TeamSpeak 的 `version` 探测（voice-bridge.ts
+   * 的 latencyProbe 分支），所以这里**包含** teamSpeakLatencyMs，不是纯
+   * 控制通道往返。它只适合用来判断"这条控制通道还活着"，不要拿它当媒体路径
+   * 延迟展示 —— 媒体路径请用 sampleMediaPath()。
+   */
   browserRttMs: number;
   teamSpeakLatencyMs: number | null;
   teamSpeakReachable: boolean;
   teamSpeakErrorCode?: string;
+}
+
+/** WebRTC 媒体路径（浏览器 ↔ 网关）的实时指标。 */
+export interface MediaPathStats {
+  /** 被选中的 ICE 候选对上的 RTT，单位毫秒；没有候选对时为 null。 */
+  rttMs: number | null;
+  /** 会话累计的入站 RTP 丢包数。 */
+  packetsLost: number;
+  /** 会话累计的入站 RTP 收包数。 */
+  packetsReceived: number;
+  /** 累计丢包率（0-100），没有任何收包时为 null。 */
+  lossPercent: number | null;
+  /** 入站 RTP 抖动，单位毫秒。 */
+  jitterMs: number | null;
 }
 
 const MAX_VISIBLE_ERROR_CODE_LENGTH = 64;
@@ -155,6 +229,20 @@ const NICKNAME_LENGTH_SIGNATURE = /invalid[\s_-]*parameter[\s_-]*size|\bid[\s=:]
 const NICKNAME_LENGTH_MESSAGE = "昵称长度不符合 TeamSpeak 服务器要求，至少 3 个字符，请修改后重试";
 
 /**
+ * TS3 对昵称的硬性要求：至少 3 个**字符**。
+ *
+ * 注意是字符不是字节 —— `奶龙` 是 6 个字节但只有 2 个字符，照样被拒。
+ * 必须在前端预校验：服务端那边 TS3 会在握手阶段静默丢弃（TS 日志里连一条记录都没有），
+ * 网关只能等到自己的内部超时才报错，用户拿到的是「连接超时，请检查网络」——
+ * 被带偏到网络上排查，而真实原因只是昵称短了一个字。
+ */
+const MIN_NICKNAME_CHARACTERS = 3;
+
+/** 连接阶段「正在连接…」的兜底上限。见 armConnectWatchdog。 */
+const CONNECT_WATCHDOG_MS = 25_000;
+const CONNECT_WATCHDOG_MESSAGE = "连接超时：服务器在 25 秒内没有响应，请重试";
+
+/**
  * Browsers only hand out a DOMException name for getUserMedia failures (and an
  * often-English message that used to reach the UI verbatim). Map every name the
  * browsers actually raise to a sentence the user can act on, and keep the
@@ -203,6 +291,9 @@ const CONNECTION_FAILURE_MESSAGES: Record<string, string> = {
   CONNECTION_REFUSED: "TeamSpeak 服务器拒绝了连接，请检查端口和服务状态",
   CONNECTION_RESET: "TeamSpeak 连接被服务器或网络重置，请稍后重试",
   TIMEOUT: "连接 TeamSpeak 超时，请检查网络或服务器状态",
+  // 服务器接了连接但不完成握手。网关和 TS 同机，所以这几乎不可能是"网络问题"，
+  // 更常见的是服务器拒绝了我们发去的参数（首要是昵称）或者正在限流。
+  HANDSHAKE_TIMEOUT: "TeamSpeak 服务器接受了连接但没有完成握手：常见原因是昵称不符合服务器要求（3-30 个字符），或服务器正在限流。请更换昵称或稍后重试",
   SERVER_PASSWORD_REQUIRED: "该服务器需要密码，请输入密码后重试",
   INVALID_SERVER_PASSWORD: "服务器密码错误，请重新输入",
   PROTOCOL_NEGOTIATION_FAILED: "TeamSpeak 协议协商失败",
@@ -247,8 +338,19 @@ export function useVoiceWebSocket() {
   let commandSequence = 0;
   const pendingCommands = new Map<string, { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
   let webrtcPeer: RTCPeerConnection | null = null;
-  let webrtcOutputElement: SinkAudioElement | null = null;
-  let webrtcPlaybackStream: MediaStream | null = null;
+  // SFU：每个 slot 一个播放节点，slot 归属由服务端的 speakerMap 消息驱动。
+  // 不再有"单个混音流"的概念 —— 说话人各自一路，浏览器侧做音量与活动检测。
+  const sfuSlotNodes = new Map<number, SfuSlotNode>();
+  const sfuSlotByTransceiver = new Map<RTCRtpTransceiver, number>();
+  let sfuActivityTimer: ReturnType<typeof setInterval> | null = null;
+  // 最近一次服务端下发的 slot → clientId 映射。
+  // 必须缓存：服务端在 answer 之后就可能开始转发并下发 speakerMap，而浏览器要等
+  // setRemoteDescription 完成才触发 ontrack。若 speakerMap 先到，建节点时就得
+  // 用它回填，否则 slot 永远绑不上成员。
+  let lastSpeakerMap: Record<string, number> = {};
+  /** 诊断用：最近收到的服务端消息类型。 */
+  const recentMessageTypes: string[] = [];
+  const webrtcSlotCount = ref(DEFAULT_WEBRTC_SLOT_COUNT);
   let webrtcPlaybackRetryCleanup: (() => void) | null = null;
   let webrtcNegotiationPromise: Promise<void> | null = null;
   let webrtcFallbackStarted = false;
@@ -412,7 +514,7 @@ export function useVoiceWebSocket() {
   function applyOutputVolume(): void {
     const level = effectiveOutputVolume();
     for (const [clientId, gain] of remoteGains) gain.gain.value = (volumes[clientId] ?? 1) * level;
-    if (webrtcOutputElement) webrtcOutputElement.volume = level;
+    syncSfuVolumes();
   }
 
   function getAudioCtx(): SinkAudioContext {
@@ -489,45 +591,6 @@ export function useVoiceWebSocket() {
     }
     outputDeviceSupported.value = true;
     if (ctx.setSinkId) await ctx.setSinkId(deviceId || "default");
-    if (webrtcOutputElement?.setSinkId) await webrtcOutputElement.setSinkId(deviceId || "default");
-  }
-
-  function installWebRtcPlaybackRetry(): void {
-    if (webrtcPlaybackRetryCleanup) return;
-    const retry = () => { void syncWebRtcPlayback(); };
-    const events: (keyof WindowEventMap)[] = ["pointerdown", "touchstart", "keydown"];
-    for (const event of events) window.addEventListener(event, retry, { passive: true });
-    document.addEventListener("visibilitychange", retry, { passive: true });
-    webrtcPlaybackRetryCleanup = () => {
-      for (const event of events) window.removeEventListener(event, retry);
-      document.removeEventListener("visibilitychange", retry);
-      webrtcPlaybackRetryCleanup = null;
-    };
-  }
-
-  async function syncWebRtcPlayback(): Promise<void> {
-    const output = webrtcOutputElement;
-    if (!output || !webrtcPlaybackStream) return;
-    // Keep WebRTC on the browser's native MediaStream playback path. The
-    // capture AudioContext is intentionally not used as a second output
-    // route: a running-but-silent graph could leave the UI reporting a live
-    // speaker while the actual remote audio element remained muted.
-    output.muted = false;
-    if (audioCtx && audioCtx.state === "suspended") {
-      try { await audioCtx.resume(); } catch { /* a user gesture is still required */ }
-    }
-    try {
-      await output.play();
-      webrtcPlaybackRetryCleanup?.();
-      clearAudioNotice("PLAYBACK_BLOCKED");
-      syncAudioContextNotice();
-    } catch {
-      // Mobile and privacy-focused browsers can require a gesture even for a
-      // MediaStream. Keep retrying after the next real interaction, but tell the
-      // user why the remote audio is missing instead of staying silent.
-      setAudioNotice("PLAYBACK_BLOCKED", "浏览器阻止了音频自动播放，暂时听不到其他成员的声音：请点击页面任意位置，或在地址栏允许本站播放声音");
-      installWebRtcPlaybackRetry();
-    }
   }
 
   function checkSupport(): string | null {
@@ -535,9 +598,27 @@ export function useVoiceWebSocket() {
     if (!window.isSecureContext) return "语音功能需要 HTTPS 安全连接";
     if (!navigator.mediaDevices?.getUserMedia) return "当前浏览器不支持麦克风访问";
     if (typeof AudioContext === "undefined") return "当前浏览器不支持 Web Audio 音频处理";
-    if (typeof AudioDecoder === "undefined") return "当前浏览器不支持音频解码，请使用最新版 Chrome 或 Edge";
+    // 这里刻意**不**要求 WebCodecs（AudioDecoder）。
+    // 只有兼容（WS）通道需要它 —— 服务端发来的 Opus 得靠 AudioDecoder 解成 PCM
+    // 才能播；WebRTC 通道下 Opus 由浏览器原生解码器在 NetEq 里解，完全不碰 WebCodecs。
+    // 放在这里当硬门槛，会把缺 WebCodecs 的浏览器（较老的 Safari、部分 Firefox /
+    // WebView）整个挡在门外，哪怕 WebRTC 路径完全可用。
+    // 真正的判定放在"要走兼容通道"的那一刻，见 compatibilityPlaybackUnavailable()。
     return null;
   }
+
+  /**
+   * 兼容（WS）通道能不能出声。
+   *
+   * 它靠 WebCodecs 的 AudioDecoder 把服务端发来的 Opus 解成 PCM。缺这个能力时
+   * 上行仍然可用（麦克风由服务端编码），但用户听不到任何人 —— 必须在降级的那一刻
+   * 明确告知，而不是让他自己猜"是不是没人在说话"。
+   */
+  function compatibilityPlaybackUnavailable(): boolean {
+    return typeof AudioDecoder === "undefined";
+  }
+
+  const COMPATIBILITY_PLAYBACK_NOTICE = "当前浏览器缺少音频解码能力（WebCodecs），兼容传输下你将听不到其他人的声音；请更新浏览器后重试";
 
   function microphoneConstraints(): MediaTrackConstraints {
     const constraints: MediaTrackConstraints = {
@@ -935,43 +1016,32 @@ export function useVoiceWebSocket() {
     if (!microphoneTrack) throw new Error("没有可用的麦克风音轨");
 
     stopCaptureGraph();
-    const peer = new RTCPeerConnection({ iceServers: [] });
+    const peer = new RTCPeerConnection({ iceServers: activeIceServers });
     webrtcPeer = peer;
     webrtcFallbackStarted = false;
     microphoneTrack.enabled = !microphoneMuted.value;
     const mixedStream = createWebRtcMixStream();
     const mixedTrack = mixedStream.getAudioTracks()[0];
     if (!mixedTrack) throw new Error("混合音频轨道创建失败");
-    peer.addTrack(mixedTrack, mixedStream);
+    // SFU：一次性谈好 K 条 audio m-line。slot0 承载上行麦克风 + 一路下行，
+    // 其余只收。说话人进出只改变 slot 归属，不触发重协商。
+    const slotCount = webrtcSlotCount.value;
+    sfuSlotByTransceiver.clear();
+    for (let slot = 0; slot < slotCount; slot++) {
+      const transceiver = slot === 0
+        ? peer.addTransceiver(mixedTrack, { direction: "sendrecv" })
+        : peer.addTransceiver("audio", { direction: "recvonly" });
+      sfuSlotByTransceiver.set(transceiver, slot);
+    }
     peer.ontrack = (event) => {
-      const stream = event.streams[0] ?? new MediaStream([event.track]);
-      // Use the browser's native WebRTC media output. Routing the remote
-      // track through AudioContext made playback depend on autoplay policy:
-      // the control channel could report speaking while a suspended context
-      // silently discarded the actual audio. A hidden autoplaying media
-      // element keeps WebRTC's decoder and jitter buffer on the native path.
-      stopWebRtcPlayback();
-      const output = document.createElement("audio") as SinkAudioElement;
-      output.autoplay = true;
-      output.muted = false;
-      output.setAttribute("playsinline", "");
-      output.volume = effectiveOutputVolume();
-      output.setAttribute("aria-hidden", "true");
-      output.tabIndex = -1;
-      output.style.position = "fixed";
-      output.style.width = "1px";
-      output.style.height = "1px";
-      output.style.opacity = "0";
-      output.style.pointerEvents = "none";
-      output.srcObject = stream;
-      document.body.append(output);
-      webrtcOutputElement = output;
-      webrtcPlaybackStream = stream;
-      if (selectedOutputDeviceId.value && output.setSinkId) {
-        void output.setSinkId(selectedOutputDeviceId.value).catch(() => undefined);
-      }
-      void syncWebRtcPlayback();
+      const slot = sfuSlotByTransceiver.get(event.transceiver);
+      if (slot === undefined) return;
+      // 必须按 track 单独建流：服务端的 sender 没有设置 msid，浏览器会把所有
+      // 远端轨道放进同一个默认 MediaStream。若直接复用 event.streams[0]，
+      // 8 个 slot 会共用同一条含 8 条轨道的流，slot 之间就区分不开了。
+      attachSfuSlot(slot, new MediaStream([event.track]));
     };
+    startSfuActivityMonitor();
     startWebRtcMicMonitor(getAudioCtx(), micStream, microphoneTrack);
     peer.onconnectionstatechange = () => {
       if (peer.connectionState === "failed") void fallbackFromWebRtc(sequence, socket, "WEBRTC_CONNECTION_FAILED");
@@ -1044,7 +1114,11 @@ export function useVoiceWebSocket() {
     if (socket.readyState === WebSocket.OPEN && state.connected) {
       // Degrading to the compatibility transport must be visible: the user is
       // still connected, but with different latency and audio quality.
-      setAudioNotice("WEBRTC_FALLBACK", `实时语音（WebRTC）不可用（错误代码：${safeClientErrorCode(reasonCode) || "WEBRTC_UNAVAILABLE"}），已切换为兼容传输：延迟与音质可能下降`);
+      if (compatibilityPlaybackUnavailable()) {
+        setAudioNotice("COMPATIBILITY_PLAYBACK_UNSUPPORTED", COMPATIBILITY_PLAYBACK_NOTICE);
+      } else {
+        setAudioNotice("WEBRTC_FALLBACK", `实时语音（WebRTC）不可用（错误代码：${safeClientErrorCode(reasonCode) || "WEBRTC_UNAVAILABLE"}），已切换为兼容传输：延迟与音质可能下降`);
+      }
       try { await startMicrophone(); } catch (error: unknown) {
         setMicrophoneError(error);
       }
@@ -1059,19 +1133,134 @@ export function useVoiceWebSocket() {
     releaseAccompanimentStream();
     stopWebRtcMix();
     stopWebRtcMicMonitor();
-    stopWebRtcPlayback();
+    stopSfuSlots();
     if (peer) void peer.close();
   }
 
-  function stopWebRtcPlayback(): void {
-    webrtcPlaybackRetryCleanup?.();
-    webrtcPlaybackStream = null;
-    webrtcOutputElement?.pause();
-    if (webrtcOutputElement) {
-      webrtcOutputElement.srcObject = null;
-      webrtcOutputElement.remove();
+  /** 为一个 slot 建立播放节点。重复调用会先拆掉旧的。 */
+  function attachSfuSlot(slot: number, stream: MediaStream): void {
+    detachSfuSlot(slot);
+    const ctx = getAudioCtx();
+    // 本地活动检测与播放共用同一条图：AudioContext 被挂起时既没有声音、
+    // 也不会误报"正在说话"，失败模式是自洽的。
+    void ctx.resume().catch(() => undefined);
+    let element: HTMLAudioElement | null = null;
+    try {
+      const source = ctx.createMediaStreamSource(stream);
+      const gain = ctx.createGain();
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 256;
+      source.connect(gain);
+      gain.connect(analyser);
+      analyser.connect(ctx.destination);
+
+      /**
+       * 必须额外挂一个 media element 在这条远端轨道上。
+       *
+       * Chrome 只在远端轨道被挂到 HTMLMediaElement 时才会启动这条 WebRTC 接收流
+       * （接收流的播放由音频设备模块拉取驱动，元素就是那个"请求播放"的 sink）。
+       * 只挂 WebAudio 的 MediaStreamAudioSourceNode 不算 sink —— 实测此时
+       * inbound-rtp 的 packetsReceived 正常增长，但 totalSamplesReceived 与
+       * jitterBufferEmittedCount 恒为 0、media-playout 恒为 0、分析器读到全 0，
+       * 表现就是"包收得到但一点声音都没有"。服务端此时一切正常。
+       *
+       * 元素保持 muted：真正出声的是上面那条 WebAudio 图（它承担成员音量、
+       * 总音量和电平分析），元素只负责让接收流跑起来。muted 还顺带避开了
+       * 自动播放策略 —— 静音媒体无需用户手势即可 play()。
+       */
+      element = new Audio();
+      element.autoplay = true;
+      element.muted = true;
+      element.srcObject = stream;
+      void element.play().catch(() => undefined);
+
+      sfuSlotNodes.set(slot, {
+        source,
+        gain,
+        analyser,
+        buffer: new Float32Array(analyser.fftSize),
+        // 用已缓存的映射回填，覆盖 speakerMap 早于 ontrack 到达的情况。
+        clientId: lastSpeakerMap[String(slot)] ?? null,
+        stream,
+        element,
+      });
+      syncSfuVolumes();
+    } catch {
+      // 轨道可能在协商竞态里已经被关闭，忽略即可。
+      if (element) {
+        element.pause();
+        element.srcObject = null;
+      }
     }
-    webrtcOutputElement = null;
+  }
+
+  function detachSfuSlot(slot: number): void {
+    const node = sfuSlotNodes.get(slot);
+    if (!node) return;
+    if (node.clientId !== null) clearSpeaking(node.clientId);
+    try {
+      node.element.pause();
+      node.element.srcObject = null;
+      node.source.disconnect();
+      node.gain.disconnect();
+      node.analyser.disconnect();
+    } catch {
+      // 已经断开。
+    }
+    sfuSlotNodes.delete(slot);
+  }
+
+  function stopSfuSlots(): void {
+    if (sfuActivityTimer !== null) {
+      clearInterval(sfuActivityTimer);
+      sfuActivityTimer = null;
+    }
+    for (const slot of [...sfuSlotNodes.keys()]) detachSfuSlot(slot);
+    sfuSlotByTransceiver.clear();
+  }
+
+
+  /** 把成员音量与总输出音量应用到每个 slot。 */
+  function syncSfuVolumes(): void {
+    const level = effectiveOutputVolume();
+    for (const node of sfuSlotNodes.values()) {
+      const memberVolume = node.clientId === null ? 1 : (volumes[node.clientId] ?? 1);
+      node.gain.gain.value = Math.max(0, memberVolume * level);
+    }
+  }
+
+  /**
+   * 本地说话指示。
+   *
+   * SFU 不解码，服务端无法再上报 voiceActivity —— 浏览器手里有每一路的真实
+   * 音频，直接分析能量即可，比服务端估算更准。
+   */
+  function startSfuActivityMonitor(): void {
+    if (sfuActivityTimer !== null) clearInterval(sfuActivityTimer);
+    sfuActivityTimer = setInterval(() => {
+      for (const node of sfuSlotNodes.values()) {
+        if (node.clientId === null) continue;
+        node.analyser.getFloatTimeDomainData(node.buffer);
+        let sum = 0;
+        for (const value of node.buffer) sum += value * value;
+        if (Math.sqrt(sum / node.buffer.length) >= SFU_ACTIVITY_RMS) markSpeaking(node.clientId);
+      }
+    }, SFU_ACTIVITY_INTERVAL_MS);
+  }
+
+  /** 服务端下发 slot → clientId 映射时调用。 */
+  function applySpeakerMap(slots: Record<string, number>): void {
+    lastSpeakerMap = slots;
+    for (const node of sfuSlotNodes.values()) {
+      if (node.clientId !== null) clearSpeaking(node.clientId);
+      node.clientId = null;
+    }
+    for (const [slotText, clientId] of Object.entries(slots)) {
+      const node = sfuSlotNodes.get(Number(slotText));
+      if (!node || !Number.isInteger(clientId) || clientId <= 0) continue;
+      node.clientId = clientId;
+    }
+    syncSfuVolumes();
   }
 
   function startWebRtcMicMonitor(ctx: AudioContext, stream: MediaStream, track: MediaStreamTrack): void {
@@ -1386,6 +1575,36 @@ export function useVoiceWebSocket() {
     clearRemotePlayback(clientId);
   }
 
+  let connectWatchdog: ReturnType<typeof setTimeout> | null = null;
+
+  function clearConnectWatchdog(): void {
+    if (connectWatchdog !== null) {
+      clearTimeout(connectWatchdog);
+      connectWatchdog = null;
+    }
+  }
+
+  /**
+   * 给「正在连接…」一个明确的终点。
+   *
+   * 正常情况下网关十几秒内就会给出 connected 或 connectionFailed。但它也可能一句话都不说
+   * （进程刚重启、请求卡在中间态、或者像 TS3 握手那样只有超时而无解释），
+   * 那时用户会无限停在「正在连接…」上：没有进度、没有错误、只能自己猜。
+   */
+  function armConnectWatchdog(sequence: number): void {
+    clearConnectWatchdog();
+    connectWatchdog = setTimeout(() => {
+      connectWatchdog = null;
+      if (sequence !== connectionSequence || state.connected || !state.connecting) return;
+      state.connecting = false;
+      state.reconnecting = false;
+      state.errorCode = "CONNECT_TIMEOUT";
+      state.error = CONNECT_WATCHDOG_MESSAGE;
+      const socket = ws.value;
+      if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000);
+    }, CONNECT_WATCHDOG_MS);
+  }
+
   function connect(target: string, channel: string, nickname: string, serverPassword = "", identity = "", rememberIdentity = false, inviteToken = "", accelerated = false, accelerationRelayId = ""): void {
     disconnect(true);
     lastConnection = { target, channel, nickname, serverPassword, ...(identity ? { identity } : {}), rememberIdentity, accelerated, accelerationRelayId };
@@ -1396,10 +1615,17 @@ export function useVoiceWebSocket() {
     // Audio diagnostics belong to the previous session, never to the new one.
     clearMicrophoneError();
     clearAudioNotice();
+    // 昵称长度预校验：交给服务端的话要等 15 秒才收到一句误导性的「检查网络」。
+    if ([...nickname.trim()].length < MIN_NICKNAME_CHARACTERS) {
+      state.errorCode = "INVALID_NICKNAME";
+      state.error = NICKNAME_LENGTH_MESSAGE;
+      return;
+    }
     state.connecting = true;
     state.reconnecting = false;
     state.reconnectAttempt = 0;
     state.reconnectFailed = false;
+    armConnectWatchdog(sequence);
     void openTicketedConnection(sequence, target, channel, nickname, serverPassword, inviteToken, accelerated);
   }
 
@@ -1452,6 +1678,7 @@ export function useVoiceWebSocket() {
     };
     socket.onclose = (event) => {
       if (sequence !== connectionSequence) return;
+      clearConnectWatchdog();
       clearLatencyProbes();
       rejectPendingCommands(new Error("语音连接已关闭"));
       state.connected = false;
@@ -1542,6 +1769,7 @@ export function useVoiceWebSocket() {
 
   function disconnect(preserveConnection = false): void {
     connectionSequence++;
+    clearConnectWatchdog();
     clearLatencyProbes();
     rejectPendingCommands(new Error("语音连接已关闭"));
     const keepRememberedIdentity = lastConnection?.rememberIdentity === true;
@@ -1595,9 +1823,12 @@ export function useVoiceWebSocket() {
   }
 
   function handleMessage(msg: any): void {
+    recentMessageTypes.push(String(msg?.type));
+    if (recentMessageTypes.length > 15) recentMessageTypes.shift();
     switch (msg.type) {
       case "connected":
         const wasReconnecting = state.reconnecting;
+        clearConnectWatchdog();
         state.connected = true;
         state.connecting = false;
         state.reconnecting = false;
@@ -1622,6 +1853,10 @@ export function useVoiceWebSocket() {
           identityMaterial.value = msg.identity;
           if (lastConnection) lastConnection.identity = msg.identity;
         }
+        // SFU 的 slot 数必须与服务端一致，否则 offer 的 m-line 数量对不上。
+        if (typeof msg.webrtcSlotCount === "number" && Number.isInteger(msg.webrtcSlotCount) && msg.webrtcSlotCount >= 1) {
+          webrtcSlotCount.value = msg.webrtcSlotCount;
+        }
         if (wasReconnecting) {
           const start = msg.webrtcAvailable === true && typeof RTCPeerConnection !== "undefined"
             ? (ws.value ? startWebRtcTransport(connectionSequence, ws.value) : Promise.resolve())
@@ -1632,6 +1867,10 @@ export function useVoiceWebSocket() {
         } else if (msg.webrtcAvailable === true && typeof RTCPeerConnection !== "undefined" && ws.value) {
           void startWebRtcTransport(connectionSequence, ws.value).catch((error: unknown) => { setMicrophoneError(error); });
         } else {
+          // 走兼容（WS）通道：缺 WebCodecs 时上行还在、但听不到任何人，必须先说清楚。
+          if (compatibilityPlaybackUnavailable()) {
+            setAudioNotice("COMPATIBILITY_PLAYBACK_UNSUPPORTED", COMPATIBILITY_PLAYBACK_NOTICE);
+          }
           void ensureMicrophone().catch((error: unknown) => { setMicrophoneError(error); });
         }
         break;
@@ -1762,6 +2001,7 @@ export function useVoiceWebSocket() {
         whisperActive.value = false;
         break;
       case "connectionFailed":
+        clearConnectWatchdog();
         state.connected = false;
         state.canMoveClients = false;
         state.connecting = false;
@@ -1790,6 +2030,17 @@ export function useVoiceWebSocket() {
         setAudioNotice(audioCode, audioNoticeMessage(audioCode, msg.detail));
         break;
       }
+      case "speakerMap":
+        // SFU：服务端下发 slot → clientId 映射。slot 数固定，说话人进出只改
+        // 归属，不重协商。
+        if (msg.slots && typeof msg.slots === "object" && !Array.isArray(msg.slots)) {
+          const slots: Record<string, number> = {};
+          for (const [slotText, clientId] of Object.entries(msg.slots as Record<string, unknown>)) {
+            if (typeof clientId === "number" && Number.isInteger(clientId) && clientId > 0) slots[slotText] = clientId;
+          }
+          applySpeakerMap(slots);
+        }
+        break;
       case "voiceActivity":
         if (Array.isArray(msg.clientIds)) {
           for (const clientId of msg.clientIds) {
@@ -1877,6 +2128,48 @@ export function useVoiceWebSocket() {
       pendingLatencyProbes.set(sequence, { startedAt: performance.now(), resolve, timer });
       sendCmd("latencyProbe", { sequence });
     });
+  }
+
+  /**
+   * 采样 WebRTC 媒体路径指标。
+   *
+   * RTT 取自被选中的 ICE 候选对（`currentRoundTripTime`），也就是浏览器与网关
+   * 实际走的那条 UDP 路径；丢包与抖动取自入站 RTP 的累计计数器。这条路径与
+   * WebSocket 控制通道完全独立 —— WebRTC 启用后音频不再经过 WebSocket。
+   *
+   * 返回 null 表示当前没有可测的媒体路径：WebRTC 未启用（兼容传输），或尚未
+   * 协商出候选对。调用方应把 null 当作"不可测"而不是"延迟为 0"。
+   */
+  async function sampleMediaPath(): Promise<MediaPathStats | null> {
+    const peer = webrtcPeer;
+    if (!peer || !webrtcActive.value) return null;
+    try {
+      const report = await peer.getStats();
+      const pairRtts: number[] = [];
+      const jitters: number[] = [];
+      let packetsLost = 0;
+      let packetsReceived = 0;
+      report.forEach((entry: Record<string, unknown>) => {
+        if (entry.type === "candidate-pair" && entry.state === "succeeded" && entry.nominated === true && typeof entry.currentRoundTripTime === "number") {
+          pairRtts.push(entry.currentRoundTripTime * 1000);
+        } else if (entry.type === "inbound-rtp" && entry.kind === "audio") {
+          if (typeof entry.packetsLost === "number") packetsLost += entry.packetsLost;
+          if (typeof entry.packetsReceived === "number") packetsReceived += entry.packetsReceived;
+          if (typeof entry.jitter === "number") jitters.push(entry.jitter * 1000);
+        }
+      });
+      const totalPackets = packetsLost + packetsReceived;
+      return {
+        rttMs: pairRtts.length ? Math.round(Math.min(...pairRtts)) : null,
+        packetsLost,
+        packetsReceived,
+        lossPercent: totalPackets > 0 ? Math.round((packetsLost / totalPackets) * 100) : null,
+        jitterMs: jitters.length ? Math.round(Math.max(...jitters)) : null,
+      };
+    } catch {
+      // peer 正在关闭时 getStats() 会抛错。这只是一次采样失败，不是错误状态。
+      return null;
+    }
   }
 
   function sendTextMessage(message: string, targetId = ""): void {
@@ -2016,13 +2309,13 @@ export function useVoiceWebSocket() {
     if (webrtcPeer || webrtcActive.value) sendCmd("setMemberVolume", { clientId, volume: normalized });
   }
 
+  /**
+   * 成员音量在浏览器侧生效 —— SFU 下服务端不参与混音，不再需要把每个成员的
+   * 音量发给服务端。
+   */
   function syncWebRtcMemberVolumes(): void {
-    if (!webrtcActive.value || ws.value?.readyState !== WebSocket.OPEN) return;
-    for (const [rawClientId, volume] of Object.entries(volumes)) {
-      const clientId = Number(rawClientId);
-      if (!Number.isInteger(clientId) || clientId <= 0) continue;
-      sendCmd("setMemberVolume", { clientId, volume });
-    }
+    if (!webrtcActive.value) return;
+    syncSfuVolumes();
   }
 
   function setInputVolume(volume: number): void {
@@ -2066,6 +2359,173 @@ export function useVoiceWebSocket() {
   function setNotificationVolume(volume: number): void {
     notificationVolume.value = clamp(volume, 0, 1);
     void saveAudioPreferences();
+  }
+
+  /**
+   * 只读诊断出口。
+   *
+   * 出问题时从 DOM 上看不出播放状态（SFU 的 `<audio>` 元素是静音的 sink，
+   * 真正出声的是 WebAudio 图），把它挂到 window 上，便于在浏览器控制台或
+   * 自动化测试里直接读到 slot 绑定、增益与实时能量。不参与任何逻辑。
+   */
+  if (typeof window !== "undefined") {
+    Object.defineProperty(window, "__webspeakSfu", {
+      configurable: true,
+      get: () => ({
+        speakerMap: { ...lastSpeakerMap },
+        recentMessages: [...recentMessageTypes],
+        audioContextState: audioCtx?.state ?? "none",
+        slotCount: webrtcSlotCount.value,
+        webrtcActive: webrtcActive.value,
+        /** 浏览器侧实际协商的 SDP 与收发器状态。 */
+        negotiation: () => {
+          if (!webrtcPeer) return null;
+          return {
+            transceivers: webrtcPeer.getTransceivers().map((t) => ({
+              mid: t.mid,
+              direction: t.direction,
+              currentDirection: t.currentDirection,
+              senderTrack: t.sender?.track?.kind ?? null,
+              receiverTrack: t.receiver?.track?.kind ?? null,
+            })),
+            offerSdp: webrtcPeer.localDescription?.sdp ?? null,
+            answerSdp: webrtcPeer.remoteDescription?.sdp ?? null,
+          };
+        },
+        /** 读取 WebRTC 接收统计，用来确认下行 RTP 是否真的到达浏览器。 */
+        peerStats: async () => {
+          if (!webrtcPeer) return null;
+          const report = await webrtcPeer.getStats();
+          const inbound: Array<Record<string, unknown>> = [];
+          const pairs: Array<Record<string, unknown>> = [];
+          let mediaPlayout: Record<string, unknown> | null = null;
+          let outbound: Record<string, unknown> | null = null;
+          report.forEach((entry: Record<string, unknown>) => {
+            if (entry.type === "inbound-rtp") {
+              inbound.push({
+                mid: entry.mid,
+                kind: entry.kind,
+                ssrc: entry.ssrc,
+                packetsReceived: entry.packetsReceived,
+                bytesReceived: entry.bytesReceived,
+                packetsLost: entry.packetsLost,
+                jitter: entry.jitter,
+                totalSamplesReceived: entry.totalSamplesReceived,
+                concealedSamples: entry.concealedSamples,
+                // 换源（slot 复用）时时间戳若不连续，这里会明显增长 ——
+                // 比 concealedSamples 更能反映"换人后对端有没有被卡一下"。
+                removedSamplesForAcceleration: entry.removedSamplesForAcceleration,
+                insertedSamplesForDeceleration: entry.insertedSamplesForDeceleration,
+                // 不受 NetEq 的 decoded_output_played_ 闸门影响：为 0 而
+                // packetsReceived 在涨 ⇒ 接收流从未被拉取（缺 sink），
+                // 而不是 RTP 层有问题。
+                jitterBufferEmittedCount: entry.jitterBufferEmittedCount,
+                jitterBufferDelay: entry.jitterBufferDelay,
+                totalAudioEnergy: entry.totalAudioEnergy,
+              });
+            } else if (entry.type === "media-playout") {
+              mediaPlayout = {
+                totalSamplesDuration: entry.totalSamplesDuration,
+                totalSamplesCount: entry.totalSamplesCount,
+              };
+            } else if (entry.type === "outbound-rtp" && entry.kind === "audio") {
+              outbound = { packetsSent: entry.packetsSent, bytesSent: entry.bytesSent };
+            } else if (entry.type === "candidate-pair" && entry.state === "succeeded" && entry.nominated) {
+              pairs.push({ bytesReceived: entry.bytesReceived, bytesSent: entry.bytesSent });
+            }
+          });
+          return { inbound, pairs, mediaPlayout, outbound };
+        },
+        /**
+         * 用 <audio> 元素播放某个 slot 的流，读 Chrome 的解码字节数。
+         * 用来判断"轨道里有没有可解码的音频"—— 比分析器更能区分
+         * "没收到音频"和"WebAudio 图有问题"。
+         */
+        probeElement: async (slot: number) => {
+          const node = sfuSlotNodes.get(slot);
+          if (!node) return { error: "no such slot" };
+          const el = document.createElement("audio");
+          el.autoplay = true;
+          el.muted = true; // 静音播放，避免真的出声
+          el.srcObject = node.stream;
+          document.body.append(el);
+          await el.play().catch(() => undefined);
+          await new Promise((r) => setTimeout(r, 2500));
+          const anyEl = el as HTMLAudioElement & { webkitAudioDecodedByteCount?: number };
+          const result = {
+            decodedBytes: anyEl.webkitAudioDecodedByteCount ?? null,
+            paused: el.paused,
+            readyState: el.readyState,
+            error: el.error ? `${el.error.code}` : null,
+          };
+          el.pause();
+          el.srcObject = null;
+          el.remove();
+          return result;
+        },
+        /** 重建某个 slot 的音频节点（排查节点创建过早的情况）。 */
+        rebuildSlot: (slot: number) => {
+          const node = sfuSlotNodes.get(slot);
+          if (!node) return false;
+          const stream = node.stream;
+          detachSfuSlot(slot);
+          attachSfuSlot(slot, stream);
+          return true;
+        },
+        /**
+         * 用一条全新的独立音频链路测某个 slot 的能量。
+         * 用来区分"轨道本身没有音频"和"应用的音频图有问题"。
+         */
+        measureSlot: async (slot: number) => {
+          const node = sfuSlotNodes.get(slot);
+          if (!node) return { error: "no such slot" };
+          const track = node.stream.getAudioTracks()[0];
+          const probe = new AudioContext({ sampleRate: 48000 });
+          await probe.resume().catch(() => undefined);
+          const src = probe.createMediaStreamSource(node.stream);
+          const an = probe.createAnalyser();
+          an.fftSize = 1024;
+          src.connect(an);
+          const buf = new Float32Array(an.fftSize);
+          let peak = 0;
+          for (let i = 0; i < 24; i++) {
+            await new Promise((r) => setTimeout(r, 50));
+            an.getFloatTimeDomainData(buf);
+            for (const v of buf) if (Math.abs(v) > peak) peak = Math.abs(v);
+          }
+          const result = {
+            peak: Number(peak.toFixed(5)),
+            probeState: probe.state,
+            trackMuted: track?.muted ?? null,
+            trackReadyState: track?.readyState ?? null,
+            trackSettings: track?.getSettings?.() ?? null,
+            trackCount: node.stream.getAudioTracks().length,
+          };
+          await probe.close().catch(() => undefined);
+          return result;
+        },
+        slots: [...sfuSlotNodes].map(([slot, node]) => {
+          node.analyser.getFloatTimeDomainData(node.buffer);
+          let sum = 0;
+          for (const value of node.buffer) sum += value * value;
+          return {
+            slot,
+            clientId: node.clientId,
+            gain: Number(node.gain.gain.value.toFixed(3)),
+            rms: Number(Math.sqrt(sum / node.buffer.length).toFixed(4)),
+            // sink 元素是否真的在播 —— 它为 false 时接收流不会被拉取，声音必然为 0。
+            sinkPaused: node.element.paused,
+            sinkReadyState: node.element.readyState,
+            tracks: node.stream.getTracks().map((track) => ({
+              kind: track.kind,
+              enabled: track.enabled,
+              muted: track.muted,
+              readyState: track.readyState,
+            })),
+          };
+        }),
+      }),
+    });
   }
 
   return {
@@ -2135,5 +2595,7 @@ export function useVoiceWebSocket() {
     checkSupport,
     clearError,
     measureLatency,
+    sampleMediaPath,
+    webrtcActive,
   };
 }

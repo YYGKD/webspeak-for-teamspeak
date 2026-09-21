@@ -10,7 +10,7 @@
             <small>{{ t('browserWorkspace') }}</small>
           </div>
         </div>
-        <div class="header-tools"><div class="header-note"><span class="tiny-dot"></span> {{ t('secureGateway') }}</div><a class="github-button" href="https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak" target="_blank" rel="noreferrer" :title="t('githubRepository')" :aria-label="t('githubRepository')"><Icon name="github" :size="18" /><span>{{ t('githubRepository') }}</span></a><button type="button" class="qq-button" :title="t('qqGroup')" :aria-label="t('qqGroup')" aria-haspopup="dialog" @click="qqModalOpen = true"><Icon name="qq" :size="18" /><span class="qq-label">{{ t('qqGroup') }}</span></button><a class="bilibili-button" href="https://space.bilibili.com/25414873" target="_blank" rel="noreferrer" :title="t('bilibiliProfile')" :aria-label="t('bilibiliProfile')"><span class="bilibili-glyph">B</span><span class="bilibili-label">{{ t('bilibiliProfile') }}</span></a><span class="version-badge" :title="`${t('currentVersion')}: v${appVersion}`" :aria-label="`${t('currentVersion')}: v${appVersion}`">v{{ appVersion }}</span><a class="changelog-button" href="https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak/blob/master/CHANGELOG.md" target="_blank" rel="noreferrer" :title="t('viewChangelog')" :aria-label="t('viewChangelog')"><Icon name="clock" :size="16" /><span>{{ t('viewChangelog') }}</span></a><a class="guide-button" href="/admin" :title="t('adminConsole')" :aria-label="t('adminConsole')"><Icon name="settings" :size="15" /><span>{{ t('adminConsole') }}</span></a><button type="button" class="header-action theme-toggle" :title="themeLabel" :aria-label="themeLabel" @click="cycleTheme"><Icon :name="themeIcon" :size="17" /></button><LanguageSwitcher v-model="language" class="join-language-switcher" :menu-label="t('languageMenu')" @change="persistLanguage" /></div>
+        <div class="header-tools"><div class="header-note"><span class="tiny-dot"></span> {{ t('secureGateway') }}</div><a class="guide-button" href="/admin" :title="t('adminConsole')" :aria-label="t('adminConsole')"><Icon name="settings" :size="15" /><span>{{ t('adminConsole') }}</span></a><button type="button" class="header-action theme-toggle" :title="themeLabel" :aria-label="themeLabel" @click="cycleTheme"><Icon :name="themeIcon" :size="17" /></button><LanguageSwitcher v-model="language" class="join-language-switcher" :menu-label="t('languageMenu')" @change="persistLanguage" /></div>
       </header>
 
       <main class="join-content">
@@ -82,16 +82,7 @@
         <span>WebSpeak</span><span class="footer-separator">·</span><span>{{ t('teamSpeakClient') }}</span><span class="footer-spacer"></span><button type="button" class="clear-local-button" @click="clearBrowserData">{{ t('clearLocalData') }}</button><span class="footer-separator">·</span><span>{{ t('browserSupport') }}</span>
       </footer>
 
-      <!-- QQ community modal -->
-      <div v-if="qqModalOpen" class="modal-backdrop qq-modal-backdrop" @click.self="qqModalOpen = false">
-        <section class="qq-modal-card" role="dialog" aria-modal="true" :aria-labelledby="'qq-group-title'">
-          <button type="button" class="qq-modal-close" :aria-label="t('close')" :title="t('close')" @click="qqModalOpen = false"><Icon name="close" :size="19" /></button>
-          <div class="qq-modal-heading"><span class="card-kicker">{{ t('qqGroup') }}</span><h2 id="qq-group-title">{{ t('qqGroup') }}</h2></div>
-          <img class="qq-qr-image" src="/qq-group-qr.jpg" :alt="t('qqGroupQrAlt')" />
-          <p class="qq-direct-join">{{ t('qqJoinDirect') }}</p>
-          <a class="qq-join-link" :href="qqJoinUrl" :aria-label="t('joinQqGroup')" target="_blank" rel="noreferrer">{{ qqJoinUrl }}</a>
-        </section>
-      </div>
+
     </section>
 
     <!-- Connected application shell -->
@@ -101,12 +92,13 @@
           <div class="breadcrumbs"><span class="mobile-brand">TeamSpeak <em>Web</em></span><span class="crumb-muted">{{ t('serverBreadcrumb') }}</span><Icon name="chevron-right" :size="14" /><strong>{{ currentChannelName }}</strong></div>
           <div class="workspace-actions">
             <div class="network-performance">
-              <button type="button" class="performance-trigger" :title="t('networkPerformance')" :aria-label="t('networkPerformance')" :aria-expanded="performancePanelOpen" @click.stop="togglePerformancePanel"><Icon name="activity" :size="16" /><span class="performance-trigger-label">{{ t('networkPerformance') }}</span><small v-if="performanceStats.ready && performanceStats.gatewayLatencyMs != null">{{ performanceStats.gatewayLatencyMs }} ms</small><Icon name="chevron-down" :size="13" /></button>
+              <button type="button" class="performance-trigger" :title="t('networkPerformance')" :aria-label="t('networkPerformance')" :aria-expanded="performancePanelOpen" @click.stop="togglePerformancePanel"><Icon name="activity" :size="16" /><span class="performance-trigger-label">{{ t('networkPerformance') }}</span><small v-if="performanceStats.ready && performanceStats.mediaRttMs != null">{{ performanceStats.mediaRttMs }} ms</small><Icon name="chevron-down" :size="13" /></button>
               <section v-if="performancePanelOpen" class="performance-panel" role="dialog" :aria-label="t('networkPerformance')" @click.stop>
                 <header><div><strong>{{ t('networkPerformance') }}</strong><small>{{ t('networkPerformanceHint') }}</small></div><button type="button" class="performance-refresh" :title="t('measureNow')" :disabled="performanceRunning" @click="refreshPerformanceProbe"><Icon name="refresh" :size="15" /></button></header>
                 <div class="performance-route"><span>{{ t('browser') }}</span><i></i><span>{{ t('webSpeakGateway') }}</span><i></i><span>{{ t('teamSpeakServer') }}</span></div>
-                <div class="performance-metrics"><article><small>{{ t('browserToGateway') }}</small><strong>{{ performanceStats.gatewayLatencyMs == null ? '—' : `${performanceStats.gatewayLatencyMs} ms` }}</strong><span>{{ t('packetLoss') }} {{ performanceStats.gatewayLossPercent == null ? '—' : `${performanceStats.gatewayLossPercent}%` }}</span></article><article><small>{{ t('gatewayToTeamSpeak') }}</small><strong>{{ performanceStats.teamSpeakLatencyMs == null ? '—' : `${performanceStats.teamSpeakLatencyMs} ms` }}</strong><span>{{ t('packetLoss') }} {{ performanceStats.teamSpeakLossPercent == null ? '—' : `${performanceStats.teamSpeakLossPercent}%` }}</span></article></div>
-                <p class="performance-status">{{ performanceRunning ? t('measuring') : performanceStats.ready ? t('measureComplete') : t('measureUnavailable') }}</p>
+                <p class="performance-transport">{{ t('transportPath', { transport: performanceTransportLabel }) }}<template v-if="activeRelayName"> · {{ t('viaRelay', { name: activeRelayName }) }}</template></p>
+                <div class="performance-metrics"><article><small>{{ t('mediaPathRtt') }}</small><strong>{{ performanceStats.mediaRttMs == null ? '—' : `${performanceStats.mediaRttMs} ms` }}</strong><span>{{ t('mediaPathLoss') }} {{ performanceStats.mediaLossPercent == null ? '—' : `${performanceStats.mediaLossPercent}%` }}</span></article><article><small>{{ t('gatewayToTeamSpeak') }}</small><strong>{{ performanceStats.teamSpeakLatencyMs == null ? '—' : `${performanceStats.teamSpeakLatencyMs} ms` }}</strong><span>{{ t('probeFailure') }} {{ performanceStats.teamSpeakLossPercent == null ? '—' : `${performanceStats.teamSpeakLossPercent}%` }}</span></article></div>
+                <p class="performance-status">{{ performanceRunning ? t('measuring') : !performanceStats.ready ? t('measureUnavailable') : !webrtcActive ? t('mediaPathUnavailable') : t('measureComplete') }}</p>
               </section>
             </div>
             <button class="header-action" :title="t('copyInvite')" @click="doShare"><Icon name="share" :size="18" /></button>
@@ -258,16 +250,16 @@
     </div>
 
     <div v-if="memberMenu && isMobileViewport" class="member-menu-backdrop" @click="memberMenu = null"></div>
-    <div v-if="memberMenu" class="member-context-menu" :style="memberMenuStyle" @click.stop>
+    <div v-if="memberMenu" ref="memberMenuEl" class="member-context-menu" :style="memberMenuStyle" @click.stop>
       <div class="member-menu-header"><strong>{{ memberMenu.member.nickname }}</strong><button type="button" class="member-menu-close" :aria-label="t('close')" @click="memberMenu = null"><Icon name="close" :size="17" /></button></div>
       <label class="menu-volume"><span>{{ t('memberVolume') }}</span><input type="range" min="0" max="400" :value="(volumes[memberMenu.member.id] ?? 1) * 100" :style="rangeStyle((volumes[memberMenu.member.id] ?? 1) / 4, 1)" :aria-label="t('memberVolume')" @input="onVolInput(memberMenu.member.id, $event)" /></label>
       <button type="button" @click="openPrivateChat(memberMenu.member.id); memberMenu = null"><Icon name="message" :size="15" /> {{ t('privateMessage') }}</button>
       <button type="button" @click="pokeMember(memberMenu.member); memberMenu = null"><Icon name="bell" :size="15" /> {{ t('poke') }}</button>
       <button type="button" @click="toggleWhisperTarget(memberMenu.member); memberMenu = null"><Icon name="mic" :size="15" /> {{ whisperTargetIds.has(memberMenu.member.id) ? t('removeWhisperTarget') : t('setWhisperTarget') }}</button>
       <button type="button" @click="copyMemberName(memberMenu.member); memberMenu = null"><Icon name="copy" :size="15" /> {{ t('copyNickname') }}</button>
-      <div v-if="voiceState.canMoveClients" class="member-menu-submenu" @mouseenter="memberMoveMenuOpen = true">
+      <div v-if="voiceState.canMoveClients" class="member-menu-submenu" @mouseenter="openMemberMoveMenu">
         <button type="button" class="member-menu-submenu-trigger" :aria-expanded="memberMoveMenuOpen" @click="toggleMemberMoveMenu"><Icon name="chevron-right" :size="15" /> <span>{{ t('moveMemberMenu') }}</span><Icon name="chevron-right" :size="13" class="member-menu-submenu-arrow" /></button>
-        <div v-if="memberMoveMenuOpen" class="member-submenu-panel" @click.stop>
+        <div v-if="memberMoveMenuOpen" ref="memberSubmenuEl" class="member-submenu-panel" :style="memberSubmenuStyle" @click.stop>
           <button v-if="memberMoveMenuCurrentChannel" type="button" :disabled="memberMoveMenuCurrentSameChannel" @click="moveMemberDirect(memberMenu.member, memberMoveMenuCurrentChannel.id)"><Icon name="users" :size="15" /><span>{{ t('moveMemberMyChannel') }}</span><small>{{ memberMoveMenuCurrentChannel.name }}</small></button>
           <button v-for="targetChannel in memberMoveMenuOtherChannels" :key="targetChannel.id" type="button" @click="moveMemberDirect(memberMenu.member, targetChannel.id)"><Icon name="volume" :size="15" /><span>{{ targetChannel.name }}</span></button>
           <span v-if="!memberMoveMenuCurrentChannel && !memberMoveMenuOtherChannels.length" class="member-submenu-empty">{{ t('moveMemberNoChannels') }}</span>
@@ -327,7 +319,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import Icon from "../components/Icon.vue";
 import LanguageSwitcher from "../components/LanguageSwitcher.vue";
-import { useVoiceWebSocket, type ChannelInfo, type ChannelMember, type ChatMessage, type LatencyProbeResult } from "../composables/useVoiceWebSocket.js";
+import { useVoiceWebSocket, setWebRtcIceServers, type ChannelInfo, type ChannelMember, type ChatMessage, type LatencyProbeResult, type MediaPathStats } from "../composables/useVoiceWebSocket.js";
 import { clearLocalData as clearStoredLocalData, isLocalPersistenceAvailable, listFavorites, listRecentServers, loadLocalPreferences, loadStoredIdentity, recordRecentServer, removeFavorite, removeStoredIdentity, saveFavorite, saveLocalPreferences, saveStoredIdentity, type FavoriteServer, type RecentServer } from "../services/local-persistence.js";
 import { applyTheme, getStoredTheme, isDarkTheme, nextTheme, saveTheme, type ThemeMode } from "../services/theme.js";
 import { combineTeamSpeakTarget, DEFAULT_TEAM_SPEAK_PORT, isValidTeamSpeakPort, splitTeamSpeakTarget } from "../services/teamspeak-target.js";
@@ -400,6 +392,8 @@ const {
   checkSupport,
   clearError,
   measureLatency,
+  sampleMediaPath,
+  webrtcActive,
 } = useVoiceWebSocket();
 
 const query = new URLSearchParams(location.search);
@@ -422,7 +416,6 @@ const welcomeTextEn = ref("");
 const welcomeTextDe = ref("");
 const welcomeTextRu = ref("");
 const welcomeTextJa = ref("");
-const appVersion = ref("0.2.2");
 const accelerationRelays = ref<Array<{ id: string; name: string }>>([]);
 const accelerationRelayId = ref("");
 const accelerationAvailable = computed(() => accelerationRelays.value.length > 0);
@@ -434,8 +427,6 @@ const selectedChannelId = ref("");
 const settingsOpen = ref(false);
 const channelPasswordDialog = reactive({ open: false, channelId: "", password: "", error: "", submitting: false });
 const serverPasswordDialog = reactive({ open: false, password: "", errorCode: "" });
-const qqModalOpen = ref(false);
-const qqJoinUrl = "http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=yhumUMDD9PmyYFWdXWUb_x7hM5trFQY8&authKey=Pw3HBGT7GwMinTQnuFGfnpf0aRSzXOJKcAiujVP1%2BXMpjheAKrncTRivicBJxpjV&noverify=0&group_code=869500475";
 const audioSettingsError = ref("");
 const toast = ref("");
 const chatListEl = ref<HTMLElement | null>(null);
@@ -447,6 +438,12 @@ const away = ref(false);
 const awayMessage = ref("");
 const memberMenu = ref<{ member: ChannelMember; x: number; y: number } | null>(null);
 const memberMoveMenuOpen = ref(false);
+const memberMenuEl = ref<HTMLElement | null>(null);
+const memberSubmenuEl = ref<HTMLElement | null>(null);
+/** 二级菜单的内联坐标（元素自身坐标系，不是可视像素）。 */
+const memberSubmenuPosition = ref<{ x: number; y: number } | null>(null);
+/** 浮层与视口边缘的最小间距（可视像素）。 */
+const MENU_VIEWPORT_MARGIN = 12;
 const draggedMember = ref<ChannelMember | null>(null);
 const dragOverChannelId = ref("");
 const memberPointerDrag = reactive({ member: null as ChannelMember | null, pointerId: null as number | null, startX: 0, startY: 0, active: false, targetChannelId: "" });
@@ -458,6 +455,7 @@ const performanceRunning = ref(false);
 const performanceSamples = ref<LatencyProbeResult[]>([]);
 const performanceProbeResults = ref<Array<LatencyProbeResult | null>>([]);
 const performanceAttempts = ref(0);
+const mediaPathSamples = ref<MediaPathStats[]>([]);
 const PERFORMANCE_INTERVAL_MS = 3_000;
 const PERFORMANCE_WINDOW_SIZE = 20;
 let performanceTimer: number | null = null;
@@ -758,13 +756,19 @@ const translations: Record<string, Record<string, string>> = {
     voiceLobby: "语音大厅",
     languageMenu: "语言",
     networkPerformance: "网络性能",
-    networkPerformanceHint: "浏览器到网关，再到 TeamSpeak 的实时探测",
+    networkPerformanceHint: "浏览器到网关的媒体路径，以及网关到 TeamSpeak 的实时探测",
     browser: "浏览器",
     webSpeakGateway: "WebSpeak",
     teamSpeakServer: "TeamSpeak",
-    browserToGateway: "浏览器 → WebSpeak",
+    transportPath: "传输：{{transport}}",
+    transportWebRtc: "WebRTC",
+    transportCompatible: "兼容传输",
+    viaRelay: "中继：{{name}}",
+    mediaPathRtt: "媒体路径 RTT",
+    mediaPathLoss: "媒体丢包",
+    probeFailure: "探测失败",
     gatewayToTeamSpeak: "WebSpeak → TeamSpeak",
-    packetLoss: "丢包",
+    mediaPathUnavailable: "当前为兼容传输，没有可测的媒体路径 RTT",
     measuring: "正在测量…",
     measureComplete: "持续监测中（每 3 秒更新）",
     measureNow: "立即测量",
@@ -1048,13 +1052,19 @@ const translations: Record<string, Record<string, string>> = {
     voiceLobby: "Voice lobby",
     languageMenu: "Language",
     networkPerformance: "Network performance",
-    networkPerformanceHint: "Live probes from the browser to WebSpeak and TeamSpeak",
+    networkPerformanceHint: "Live media-path probe from the browser to WebSpeak, plus WebSpeak to TeamSpeak",
     browser: "Browser",
     webSpeakGateway: "WebSpeak",
     teamSpeakServer: "TeamSpeak",
-    browserToGateway: "Browser → WebSpeak",
+    transportPath: "Transport: {{transport}}",
+    transportWebRtc: "WebRTC",
+    transportCompatible: "Compatible transport",
+    viaRelay: "Relay: {{name}}",
+    mediaPathRtt: "Media path RTT",
+    mediaPathLoss: "Media loss",
+    probeFailure: "Probe failures",
     gatewayToTeamSpeak: "WebSpeak → TeamSpeak",
-    packetLoss: "Packet loss",
+    mediaPathUnavailable: "Compatible transport is active, so there is no media-path RTT to measure",
     measuring: "Measuring…",
     measureComplete: "Monitoring continuously (updates every 3s)",
     measureNow: "Measure now",
@@ -1341,13 +1351,19 @@ translations.de = {
     voiceLobby: "Sprachlobby",
     languageMenu: "Sprache",
     networkPerformance: "Netzwerkleistung",
-    networkPerformanceHint: "Live-Messung vom Browser über WebSpeak zu TeamSpeak",
+    networkPerformanceHint: "Live-Messung des Medienpfads Browser→WebSpeak und der Strecke WebSpeak→TeamSpeak",
     browser: "Browser",
     webSpeakGateway: "WebSpeak",
     teamSpeakServer: "TeamSpeak",
-    browserToGateway: "Browser → WebSpeak",
+    transportPath: "Transport: {{transport}}",
+    transportWebRtc: "WebRTC",
+    transportCompatible: "Kompatibler Transport",
+    viaRelay: "Relay: {{name}}",
+    mediaPathRtt: "Medienpfad-RTT",
+    mediaPathLoss: "Medienverlust",
+    probeFailure: "Fehlgeschlagene Messungen",
     gatewayToTeamSpeak: "WebSpeak → TeamSpeak",
-    packetLoss: "Paketverlust",
+    mediaPathUnavailable: "Kompatibler Transport aktiv – kein Medienpfad-RTT messbar",
     measuring: "Wird gemessen…",
     measureComplete: "Laufende Messung (alle 3 Sekunden)",
     measureNow: "Jetzt messen",
@@ -1430,8 +1446,15 @@ translations.ru = {
   localDataCleared: "Локальные данные очищены",
   languageMenu: "Язык",
   networkPerformance: "Сетевая производительность",
-  networkPerformanceHint: "Непрерывные измерения от браузера через WebSpeak к TeamSpeak",
-  packetLoss: "Потери пакетов",
+  networkPerformanceHint: "Измерение медиапути от браузера до WebSpeak и участка WebSpeak → TeamSpeak",
+  transportPath: "Транспорт: {{transport}}",
+  transportWebRtc: "WebRTC",
+  transportCompatible: "Совместимый транспорт",
+  viaRelay: "Ретранслятор: {{name}}",
+  mediaPathRtt: "RTT медиапути",
+  mediaPathLoss: "Потери в медиапотоке",
+  probeFailure: "Неудачные измерения",
+  mediaPathUnavailable: "Активен совместимый транспорт — RTT медиапути недоступен",
   measuring: "Измерение…",
   measureComplete: "Мониторинг продолжается (обновление каждые 3 секунды)",
   measureNow: "Измерить сейчас",
@@ -1514,8 +1537,15 @@ translations.ja = {
   localDataCleared: "ローカルデータを消去しました",
   languageMenu: "言語",
   networkPerformance: "ネットワーク性能",
-  networkPerformanceHint: "ブラウザから WebSpeak を経由して TeamSpeak まで継続測定",
-  packetLoss: "パケット損失",
+  networkPerformanceHint: "ブラウザから WebSpeak までのメディアパスと、WebSpeak から TeamSpeak までの継続測定",
+  transportPath: "転送方式：{{transport}}",
+  transportWebRtc: "WebRTC",
+  transportCompatible: "互換転送",
+  viaRelay: "中継：{{name}}",
+  mediaPathRtt: "メディアパス RTT",
+  mediaPathLoss: "メディア損失",
+  probeFailure: "測定失敗",
+  mediaPathUnavailable: "互換転送のため、メディアパスの RTT は測定できません",
   measuring: "測定中…",
   measureComplete: "継続監視中（3秒ごとに更新）",
   measureNow: "今すぐ測定",
@@ -1586,6 +1616,9 @@ function localizedMessage(message: string) {
     "当前浏览器不支持麦克风访问": "This browser does not support microphone access",
     "当前浏览器不支持 Web Audio 音频处理": "This browser does not support Web Audio processing",
     "当前浏览器不支持音频解码，请使用最新版 Chrome 或 Edge": "Audio decoding is unavailable. Use the latest Chrome or Edge",
+    "当前浏览器缺少音频解码能力（WebCodecs），兼容传输下你将听不到其他人的声音；请更新浏览器后重试": "This browser lacks WebCodecs audio decoding, so the compatibility transport cannot play other people's voices. Update your browser and try again",
+    "连接超时：服务器在 25 秒内没有响应，请重试": "Connection timed out: the server did not respond within 25 seconds. Try again",
+    "TeamSpeak 服务器接受了连接但没有完成握手：常见原因是昵称不符合服务器要求（3-30 个字符），或服务器正在限流。请更换昵称或稍后重试": "TeamSpeak accepted the connection but never completed the handshake. This usually means the server rejected our parameters (most often the nickname, which must be 3-30 characters) or is rate-limiting. Change the nickname or try again later",
     "当前浏览器不支持扬声器设备选择，将使用默认输出设备": "Output device selection is not supported by this browser. Using the default output device",
     "所选扬声器当前不可用": "The selected speaker is not available",
     "连接服务器失败，请检查邀请链接或服务器状态": "Could not connect. Check the invite link or server status",
@@ -1966,7 +1999,23 @@ const chatTabLabel = computed(() => chatTab.value === "channel" ? t("textChannel
 const chatTitle = computed(() => chatTab.value === "channel" ? t("channelChat", { channel: currentChannelName.value }) : chatTab.value === "server" ? t("serverChat") : chatTab.value === "events" ? t("eventLog") : privateConversations.value.find((conversation) => conversation.id === privateClientId.value)?.name ?? t("privateMessage"));
 const chatPlaceholder = computed(() => chatTab.value === "private" ? t("privateMessagePlaceholder") : chatTab.value === "server" ? t("serverMessagePlaceholder") : t("sendMessagePlaceholder"));
 const visiblePokes = computed(() => pokeNotifications.slice(-3));
-const memberMenuStyle = computed(() => memberMenu.value ? { left: `${memberMenu.value.x}px`, top: `${memberMenu.value.y}px` } : {});
+const memberMenuStyle = computed(() => {
+  const current = memberMenu.value;
+  if (!current) return {};
+  const style: Record<string, string> = { left: `${current.x}px`, top: `${current.y}px` };
+  // 窄屏交给 CSS（贴底 + 固定高度上限）；桌面端按视口夹取位置时同步限制高度。
+  if (!isMobileViewport.value) style.maxHeight = `${menuMaxHeightInline(uiScale())}px`;
+  return style;
+});
+const memberSubmenuStyle = computed(() => {
+  const position = memberSubmenuPosition.value;
+  if (!position || isMobileViewport.value) return {};
+  return {
+    left: `${position.x}px`,
+    top: `${position.y}px`,
+    maxHeight: `${menuMaxHeightInline(uiScale(), 420)}px`,
+  };
+});
 const median = (values: number[]) => {
   const sorted = [...values].sort((left, right) => left - right);
   return sorted.length ? sorted[Math.floor(sorted.length / 2)] : null;
@@ -1974,15 +2023,24 @@ const median = (values: number[]) => {
 const performanceStats = computed(() => {
   const samples = performanceSamples.value;
   const attempts = performanceAttempts.value;
-  const gatewaySamples = samples.map((sample) => sample.browserRttMs);
+  const media = mediaPathSamples.value;
   const teamSpeakSamples = samples.filter((sample) => sample.teamSpeakReachable && sample.teamSpeakLatencyMs != null).map((sample) => sample.teamSpeakLatencyMs as number);
+  const latestMedia = media[media.length - 1];
   return {
-    gatewayLatencyMs: median(gatewaySamples),
-    gatewayLossPercent: attempts > 0 ? Math.round(((attempts - samples.length) / attempts) * 100) : null,
+    // 媒体路径 RTT 取窗口内中位数；丢包是会话累计值，所以取最新一次采样。
+    mediaRttMs: median(media.map((sample) => sample.rttMs).filter((value): value is number => value != null)),
+    mediaLossPercent: latestMedia?.lossPercent ?? null,
     teamSpeakLatencyMs: median(teamSpeakSamples),
+    // 这一项是"探测失败率"（探测超时或 TeamSpeak 未响应），不是媒体丢包。
     teamSpeakLossPercent: attempts > 0 ? Math.round(((attempts - teamSpeakSamples.length) / attempts) * 100) : null,
     ready: attempts > 0,
   };
+});
+const performanceTransportLabel = computed(() => webrtcActive.value ? t("transportWebRtc") : t("transportCompatible"));
+const activeRelayName = computed(() => {
+  const relayId = accelerationRelayId.value;
+  if (!relayId) return "";
+  return accelerationRelays.value.find((relay) => relay.id === relayId)?.name ?? "";
 });
 
 watch(channelTree, (list) => {
@@ -2081,6 +2139,7 @@ function resetPerformanceSamples(): void {
   performanceProbeResults.value = [];
   performanceSamples.value = [];
   performanceAttempts.value = 0;
+  mediaPathSamples.value = [];
 }
 
 function startPerformanceMonitoring(): void {
@@ -2110,12 +2169,18 @@ async function runPerformanceProbe(generation = performanceMonitorGeneration): P
   if (performanceRunning.value || !voiceState.connected || !performancePanelOpen.value) return;
   performanceRunning.value = true;
   try {
-    const sample = await measureLatency();
+    // 两条路径各测各的：媒体路径走 WebRTC getStats()，TeamSpeak 那一段仍走
+    // WebSocket 上的 latencyProbe。不要用后者推算前者。
+    const [sample, media] = await Promise.all([measureLatency(), sampleMediaPath()]);
     if (generation !== performanceMonitorGeneration || !performancePanelOpen.value) return;
     performanceProbeResults.value.push(sample);
     if (performanceProbeResults.value.length > PERFORMANCE_WINDOW_SIZE) performanceProbeResults.value.shift();
     performanceAttempts.value = performanceProbeResults.value.length;
     performanceSamples.value = performanceProbeResults.value.filter((result): result is LatencyProbeResult => result !== null);
+    if (media) {
+      mediaPathSamples.value.push(media);
+      if (mediaPathSamples.value.length > PERFORMANCE_WINDOW_SIZE) mediaPathSamples.value.shift();
+    }
   } finally {
     if (generation === performanceMonitorGeneration) performanceRunning.value = false;
   }
@@ -2300,7 +2365,8 @@ async function clearBrowserData(): Promise<void> {
   if (!window.confirm(t("clearLocalDataConfirm"))) return;
   await clearStoredLocalData();
   for (const key of ["webspeak:nickname", "webspeak:language", "webspeak:theme", "webspeak:input-device", "webspeak:output-device", "webspeak:remember-identity"]) localStorage.removeItem(key);
-  themeMode.value = "system";
+  // 「清除本地数据」应当回到与首次访问一致的默认主题（见 services/theme.ts）
+  themeMode.value = "light";
   applyTheme(themeMode.value);
   identityMaterial.value = "";
   rememberIdentity.value = false;
@@ -2313,8 +2379,7 @@ async function loadPublicConfig() {
   try {
     const response = await fetch("/api/public-config", { headers: { accept: "application/json" } });
     if (!response.ok) return;
-    const config = await response.json() as { version?: unknown; initialized?: unknown; siteName?: unknown; welcomeText?: unknown; welcomeTextEn?: unknown; welcomeTexts?: unknown; accessMode?: unknown; target?: unknown; accelerationAvailable?: unknown; accelerationRelays?: unknown };
-    if (typeof config.version === "string" && config.version.trim()) appVersion.value = config.version.trim();
+    const config = await response.json() as { version?: unknown; initialized?: unknown; siteName?: unknown; welcomeText?: unknown; welcomeTextEn?: unknown; welcomeTexts?: unknown; accessMode?: unknown; target?: unknown; accelerationAvailable?: unknown; accelerationRelays?: unknown; iceServers?: unknown };
     initialized.value = config.initialized === true;
     if (typeof config.siteName === "string" && config.siteName.trim()) siteName.value = config.siteName.trim();
     if (typeof config.welcomeText === "string") welcomeTextZh.value = config.welcomeText;
@@ -2328,6 +2393,26 @@ async function loadPublicConfig() {
       if (typeof welcomeTexts.ja === "string") welcomeTextJa.value = welcomeTexts.ja;
     }
     accessMode.value = config.accessMode === "open" ? "open" : "fixed";
+    // WebRTC 的 ICE 配置由服务端下发（STUN + 可选 TURN），前端不硬编码部署相关的地址。
+    // TURN 的临时凭据也在这里 —— username/credential 必须原样带上，
+    // 只留 urls 会让 TURN 直接不可用（认证失败），而且不带报错，很难查。
+    if (Array.isArray(config.iceServers)) {
+      const iceServers = config.iceServers.flatMap((value) => {
+        if (!value || typeof value !== "object") return [];
+        const server = value as { urls?: unknown; username?: unknown; credential?: unknown };
+        const urls = typeof server.urls === "string"
+          ? [server.urls]
+          : Array.isArray(server.urls)
+            ? server.urls.filter((url): url is string => typeof url === "string" && url.length > 0)
+            : [];
+        if (!urls.length) return [];
+        const entry: RTCIceServer = { urls: urls.length === 1 ? urls[0] : urls };
+        if (typeof server.username === "string" && server.username) entry.username = server.username;
+        if (typeof server.credential === "string" && server.credential) entry.credential = server.credential;
+        return [entry];
+      });
+      setWebRtcIceServers(iceServers);
+    }
     accelerationRelays.value = Array.isArray(config.accelerationRelays)
       ? config.accelerationRelays.flatMap((value) => {
         if (!value || typeof value !== "object") return [];
@@ -2368,16 +2453,92 @@ function openPrivateChat(clientId: number): void {
   nextTick(scrollChatToEnd);
 }
 
+/**
+ * 应用整体缩放（#app 的 zoom，见 App.vue / main.ts），默认 1。
+ *
+ * 这个系数必须参与换算：#app 的 zoom 会把 position: fixed 子元素的内联
+ * left/top 一并放大，而 clientX/Y、getBoundingClientRect()、innerWidth/Height
+ * 都是可视像素；CSS 的 vh 也按元素自身坐标系解析，所以 100vh 的高度上限在
+ * 缩放后反而高于视口。按元素坐标系写入、按可视坐标系夹取，两边才不会错位。
+ */
+function uiScale(): number {
+  if (typeof document === "undefined") return 1;
+  const value = Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--ui-scale"));
+  return Number.isFinite(value) && value > 0 ? value : 1;
+}
+
+/** 在可视坐标系里把浮层夹进视口。 */
+function clampMenuPosition(width: number, height: number, x: number, y: number): { x: number; y: number } {
+  const maxX = Math.max(MENU_VIEWPORT_MARGIN, window.innerWidth - width - MENU_VIEWPORT_MARGIN);
+  const maxY = Math.max(MENU_VIEWPORT_MARGIN, window.innerHeight - height - MENU_VIEWPORT_MARGIN);
+  return { x: Math.min(Math.max(MENU_VIEWPORT_MARGIN, x), maxX), y: Math.min(Math.max(MENU_VIEWPORT_MARGIN, y), maxY) };
+}
+
+/** 浮层在自身坐标系下的高度上限：换算成可视像素后不超过视口。 */
+function menuMaxHeightInline(scale: number, designCap = Number.POSITIVE_INFINITY): number {
+  return Math.max(120, Math.min(designCap, (window.innerHeight - MENU_VIEWPORT_MARGIN * 2) / scale));
+}
+
+/**
+ * 用渲染后的真实尺寸把右键菜单夹进视口。
+ *
+ * 旧实现按固定 210×170 估算可用空间，而菜单实际高度超过 260px（0.2.3 增加
+ * "调度到"之后更高），所以靠底部的成员右键时，菜单下半截会掉出视口；高分辨率
+ * 下 #app 的 zoom 还会把菜单再放大一次，实测 1.5 倍缩放下会掉出 700px 以上。
+ * 现在改为渲染后量一次真实尺寸再定位：高度取 scrollHeight（不受 max-height
+ * 影响的内容高度），所以一次测量就能算出正确位置。
+ */
+function positionMemberMenu(): void {
+  const menu = memberMenuEl.value;
+  const current = memberMenu.value;
+  // 窄屏由 CSS 贴底显示，不按坐标定位。
+  if (!menu || !current || isMobileViewport.value) return;
+  const scale = uiScale();
+  const height = Math.min(menu.scrollHeight * scale, window.innerHeight - MENU_VIEWPORT_MARGIN * 2);
+  const clamped = clampMenuPosition(menu.offsetWidth * scale, height, current.x * scale, current.y * scale);
+  memberMenu.value = { member: current.member, x: clamped.x / scale, y: clamped.y / scale };
+}
+
+/**
+ * 二级菜单默认贴在"调度到"那一行的右侧，右边放不下就翻到左侧；竖向用与主菜单
+ * 相同的夹取逻辑，避免靠底部时二级菜单同样溢出。
+ */
+function positionMemberSubmenu(): void {
+  const menu = memberMenuEl.value;
+  const submenu = memberSubmenuEl.value;
+  if (!menu || !submenu || isMobileViewport.value) return;
+  const scale = uiScale();
+  const width = submenu.offsetWidth * scale;
+  const height = Math.min(submenu.scrollHeight * scale, window.innerHeight - MENU_VIEWPORT_MARGIN * 2);
+  const menuRect = menu.getBoundingClientRect();
+  const gap = 6 * scale;
+  const preferRight = menuRect.right + gap;
+  const x = preferRight + width + MENU_VIEWPORT_MARGIN > window.innerWidth ? menuRect.left - gap - width : preferRight;
+  const anchorY = (submenu.parentElement?.getBoundingClientRect().top ?? menuRect.top) - 8 * scale;
+  const clamped = clampMenuPosition(width, height, x, anchorY);
+  memberSubmenuPosition.value = { x: clamped.x / scale, y: clamped.y / scale };
+}
+
+function openMemberMoveMenu(): void {
+  memberMoveMenuOpen.value = true;
+  memberSubmenuPosition.value = null;
+  // nextTick 在 DOM 更新之后、浏览器绘制之前执行，所以不会看到未定位的一帧。
+  void nextTick(positionMemberSubmenu);
+}
+
 function openMemberMenu(member: ChannelMember, event: Event): void {
   if (member.isSelf) return;
   memberMoveMenuOpen.value = false;
+  memberSubmenuPosition.value = null;
   const point = event instanceof MouseEvent ? event : undefined;
-  memberMenu.value = { member, x: Math.min((point?.clientX ?? 20), Math.max(12, window.innerWidth - 210)), y: Math.min((point?.clientY ?? 20), Math.max(12, window.innerHeight - 170)) };
+  memberMenu.value = { member, x: point?.clientX ?? MENU_VIEWPORT_MARGIN, y: point?.clientY ?? MENU_VIEWPORT_MARGIN };
+  void nextTick(positionMemberMenu);
 }
 
 function openMemberActions(member: ChannelMember): void {
   if (member.isSelf) return;
   memberMoveMenuOpen.value = false;
+  memberSubmenuPosition.value = null;
   memberMenu.value = { member, x: 0, y: 0 };
 }
 
@@ -2386,7 +2547,7 @@ function toggleMemberMoveMenu(): void {
     showToast(t("movePermissionDenied"));
     return;
   }
-  memberMoveMenuOpen.value = true;
+  openMemberMoveMenu();
 }
 
 async function moveMemberDirect(member: ChannelMember, targetChannelId: string): Promise<void> {
@@ -3080,14 +3241,14 @@ function stopWhisperTalk(): void {
 .status-button.active .status-dot { background: #e0a34d; }
 .member-row { position: relative; padding: 4px 6px; margin: -4px -6px; border-radius: 9px; transition: background .16s ease, box-shadow .16s ease; }
 .member-row:hover, .member-row:focus-within { background: #edf7f4; box-shadow: 0 4px 12px rgba(20, 58, 51, .07); }
-.member-context-menu { position: fixed; z-index: 40; display: grid; min-width: 188px; gap: 3px; padding: 8px; background: #fff; border: 1px solid #e0eae6; border-radius: 10px; box-shadow: 0 14px 35px rgba(20, 50, 44, .16); }
+.member-context-menu { position: fixed; z-index: 40; display: grid; min-width: 188px; max-height: calc(100vh - 24px); gap: 3px; padding: 8px; overflow-y: auto; background: #fff; border: 1px solid #e0eae6; border-radius: 10px; box-shadow: 0 14px 35px rgba(20, 50, 44, .16); }
 .member-context-menu strong { padding: 4px 8px 7px; color: #2a3934; font-size: 12px; }
 .member-context-menu button { display: flex; align-items: center; gap: 8px; padding: 8px; color: #52625c; background: transparent; border-radius: 6px; font-size: 11px; text-align: left; cursor: pointer; }
 .member-context-menu button:hover { color: #006a64; background: #edf6f3; }
 .member-menu-submenu { position: relative; }
 .member-menu-submenu-trigger { width: 100%; }
 .member-menu-submenu-arrow { margin-left: auto; }
-.member-submenu-panel { position: absolute; z-index: 1; top: -8px; left: calc(100% + 6px); display: grid; min-width: 220px; max-height: min(420px, calc(100vh - 24px)); gap: 3px; padding: 8px; overflow-y: auto; background: #fff; border: 1px solid #e0eae6; border-radius: 10px; box-shadow: 0 14px 35px rgba(20, 50, 44, .16); }
+.member-submenu-panel { position: fixed; z-index: 41; top: 0; left: 0; display: grid; min-width: 220px; max-height: min(420px, calc(100vh - 24px)); gap: 3px; padding: 8px; overflow-y: auto; background: #fff; border: 1px solid #e0eae6; border-radius: 10px; box-shadow: 0 14px 35px rgba(20, 50, 44, .16); }
 .member-submenu-panel button { width: 100%; min-width: 0; }
 .member-submenu-panel button:disabled { opacity: .55; cursor: default; }
 .member-submenu-panel button span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -3496,6 +3657,7 @@ function stopWhisperTalk(): void {
 .performance-route { display: flex; align-items: center; gap: 6px; margin: 15px 0 11px; color: var(--text-muted); font-size: 9px; }
 .performance-route span { padding: 4px 6px; background: var(--surface-2); border-radius: 5px; white-space: nowrap; }
 .performance-route i { width: 18px; height: 1px; flex: 1; background: var(--accent); opacity: .55; }
+.performance-transport { margin: 0 0 11px; color: var(--text-muted); font-size: 10px; line-height: 1.45; }
 .performance-metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .performance-metrics article { min-width: 0; padding: 10px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px; }
 .performance-metrics small, .performance-metrics strong, .performance-metrics span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -3639,5 +3801,23 @@ function stopWhisperTalk(): void {
 
 @media (prefers-reduced-motion: reduce) {
   .dock-hover-panel, .dock-switch-row input, .mobile-noise-toggle input { transition-duration: .01ms; }
+}
+
+/* 窄屏页脚：固定折成两行。
+   原先 .join-footer 是 flex + nowrap，窄屏下每段文字被横向压缩、在词组中间断行
+   （实测 390px 下 "TeamSpeak 浏览器客户端" 与 "Chrome / Edge 94+" 各占 2 行，
+   与相邻 1 行项在 align-items:center 下高低不齐）。
+   只加 flex-wrap 不够：换行位置由各语言文案长度决定，实测会落在
+   "清除本地数据 ·" 之后，把 "Chrome / Edge 94+" 孤立成一行，且左右两半之间
+   没有间距、连成一串。这里用那个空 spacer 当固定断点（它本来就是左右分组的边界），
+   左半一行、右半一行，位置不再依赖文案长度。
+   同时 .join-footer 在 .join-page(overflow:hidden) 里是最后一个 flex 子项，
+   高度必须自适应，不能再钉 min-height。放在样式表末尾以确保覆盖前面同优先级的规则。 */
+@media (max-width: 740px) {
+  .join-footer { flex-wrap: wrap; row-gap: 4px; min-height: 0; padding: 10px 0; }
+  .join-footer > span, .join-footer > button { white-space: nowrap; }
+  .join-footer .footer-spacer { display: block; flex: 0 0 100%; height: 0; }
+  /* 换行后不再右推最后一项，两行统一左对齐 */
+  .join-footer span:last-child { margin-left: 0; }
 }
 </style>

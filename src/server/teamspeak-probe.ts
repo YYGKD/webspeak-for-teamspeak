@@ -118,6 +118,8 @@ export function toProbeError(error: unknown, password = ""): TeamSpeakProbeError
     connection_refused: "CONNECTION_REFUSED",
     connection_reset: "CONNECTION_RESET",
     timeout: "TIMEOUT",
+    // 探测只回答"该地址可不可以用"，细分的握手超时在这里收敛回 TIMEOUT
+    handshake_timeout: "TIMEOUT",
     authentication_failed: password.trim() ? "INVALID_PASSWORD" : "PASSWORD_REQUIRED",
     channel_password_required: "PASSWORD_REQUIRED",
     identity_security_level_too_low: "SERVER_REJECTED",
