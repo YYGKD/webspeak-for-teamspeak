@@ -3978,7 +3978,13 @@ function stopWhisperTalk(): void {
    * （实测 chat-tabs 被压到 3.4px），看起来就像"上面的内容消失了"。
    */
   .app-shell .chat-panel > *:not(.message-list) { flex: 0 0 auto; }
-  /* min-height 保证"暂无消息"的空状态不会被压扁到出现滚动条 */
+  /*
+   * 空状态自己有 min-height: 145px，加上列表 padding 共需 ~171px；列表的
+   * min-height 必须 ≥ 这个值，否则"暂无消息"也会撑出滚动条。
+   * 这里把空状态收到刚好等于内容高度（图标 48 + 间距 + 两行文字），
+   * 列表 min-height 取 150px，两者相容且不占用多余高度。
+   */
+  .app-shell .chat-empty { min-height: 96px; }
   .app-shell .message-list { flex: 1 1 auto; min-height: 150px; max-height: none; }
 }
 
