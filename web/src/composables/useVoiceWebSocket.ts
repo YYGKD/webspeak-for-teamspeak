@@ -243,6 +243,28 @@ const CONNECT_WATCHDOG_MS = 25_000;
 const CONNECT_WATCHDOG_MESSAGE = "连接超时：服务器在 25 秒内没有响应，请重试";
 
 /**
+ * How long the join-ticket request may take before it is aborted.
+ *
+ * Kept well below CONNECT_WATCHDOG_MS so a stalled request produces its own,
+ * precise error instead of racing the watchdog: the request used to have no
+ * timeout at all, so a slow gateway tripped the watchdog first and then still
+ * opened the socket once the fetch finally resolved.
+ */
+const JOIN_TICKET_TIMEOUT_MS = 15_000;
+
+/**
+ * Upper bound on a reconnect wait.
+ *
+ * The gateway retries a dropped TeamSpeak transport for 5 minutes and then sends
+ * reconnectFailed (RECONNECT_WINDOW_MS in src/server/reconnect-policy.ts), so
+ * this only fires when the gateway never answers at all — its TeamSpeak
+ * connect() hanging, or a half-open socket the browser never sees close. Without
+ * it the UI sits on "reconnecting" indefinitely: the initial connect has a
+ * watchdog, the reconnect path had none.
+ */
+const RECONNECT_WATCHDOG_MS = 6 * 60_000;
+
+/**
  * Browsers only hand out a DOMException name for getUserMedia failures (and an
  * often-English message that used to reach the UI verbatim). Map every name the
  * browsers actually raise to a sentence the user can act on, and keep the
@@ -321,6 +343,14 @@ const CONNECTION_FAILURE_MESSAGES: Record<string, string> = {
   GATEWAY_NETWORK_LOST: "与语音网关的网络连接异常中断（掉线或代理断开），并非 TeamSpeak 服务器拒绝连接，请检查网络后重新进入",
   GATEWAY_SESSION_ENDED: "语音网关会话意外结束，请重新进入语音空间",
   TEAM_SPEAK_CLIENT_UNAVAILABLE: "语音网关未能创建 TeamSpeak 客户端（服务器可能已关闭或地址不可达），请确认服务器地址或稍后重试",
+  // 客户端侧的超时（与网关给出的失败区分开：这些不是 TeamSpeak 拒绝，而是本次
+  // 尝试根本没走完）。
+  REQUEST_TIMEOUT: "向语音网关申请会话票据超时，请检查网络后重试",
+  RECONNECT_TIMEOUT: "重连语音网关超时：网关长时间没有响应，请重新进入语音空间",
+  // 网关以 1000（正常关闭）拆掉会话时，原因在关闭帧的 reason 里。见 onclose。
+  SESSION_TERMINATED_BY_ADMIN: "管理员已结束你的语音会话",
+  GATEWAY_SHUTTING_DOWN: "语音网关正在重启，请稍后重新进入语音空间",
+  GATEWAY_HEARTBEAT_LOST: "与语音网关的连接已失去响应，请重新进入语音空间",
 };
 
 export function useVoiceWebSocket() {
@@ -1359,6 +1389,47 @@ export function useVoiceWebSocket() {
     else await refreshAudioDevices();
   }
 
+  /**
+   * Rebuild the audio path after an input-device change failed.
+   *
+   * Both callers stop the WebRTC transport *before* touching the microphone, so
+   * a failure left the session in a state that looks connected but carries no
+   * audio at all:
+   *  - the local peer is closed, but the gateway only stops forwarding TeamSpeak
+   *    audio to it when it receives `webrtcStop` (or the socket closes), so the
+   *    downlink stayed pointed at a dead peer and the user heard nobody;
+   *  - the WebRTC uplink path is gone as well.
+   * Restore the microphone with the previous device, tell the gateway to drop the
+   * stale peer, and rebuild realtime audio only if the microphone came back.
+   */
+  async function recoverAudioAfterFailedInputChange(restartWebRtc: boolean): Promise<void> {
+    const socket = ws.value;
+    const canUseSocket = Boolean(socket && socket.readyState === WebSocket.OPEN);
+    if (restartWebRtc && canUseSocket) {
+      try { socket!.send(JSON.stringify({ type: "webrtcStop" })); } catch { /* socket is going away */ }
+    }
+    stopWebRtcTransport();
+    try {
+      await startMicrophone();
+    } catch (error) {
+      // startMicrophone already recorded the readable reason; keep it so the UI
+      // can say why there is no voice instead of pretending everything is fine.
+      setMicrophoneError(error);
+    }
+    if (restartWebRtc && canUseSocket && !state.microphoneError) {
+      try {
+        await startWebRtcTransport(connectionSequence, socket!);
+      } catch {
+        // startWebRtcTransport falls back to the compatibility transport itself.
+      }
+    }
+    if (state.microphoneError) {
+      setAudioNotice("AUDIO_PATH_REBUILD_FAILED", "音频处理重建失败：麦克风未能恢复，请检查设备与浏览器权限");
+    } else if (restartWebRtc && canUseSocket && !webrtcActive.value) {
+      setAudioNotice("AUDIO_REALTIME_NOT_RESTORED", "音频处理重建失败：已退回兼容传输，实时语音未能恢复，请重新进入语音空间");
+    }
+  }
+
   async function setInputDevice(deviceId: string): Promise<void> {
     const previousDeviceId = selectedInputDeviceId.value;
     const shouldRestartWebRtc = webrtcActive.value && Boolean(ws.value);
@@ -1376,6 +1447,7 @@ export function useVoiceWebSocket() {
     } catch (error) {
       selectedInputDeviceId.value = previousDeviceId;
       localStorage.setItem("webspeak:input-device", previousDeviceId);
+      await recoverAudioAfterFailedInputChange(shouldRestartWebRtc);
       throw error;
     }
   }
@@ -1569,6 +1641,15 @@ export function useVoiceWebSocket() {
       }
       remotePlaybackSources.delete(clientId);
     }
+    // The per-client GainNode stays wired to ctx.destination until it is
+    // disconnected. Only the full disconnect() used to clean it up, so every
+    // decoder reset (queue overflow) and every memberLeave leaked one orphaned
+    // GainNode per client for the rest of the session.
+    const gain = remoteGains.get(clientId);
+    if (gain) {
+      gain.disconnect();
+      remoteGains.delete(clientId);
+    }
   }
 
   function resetRemotePlayback(clientId: number): void {
@@ -1596,13 +1677,46 @@ export function useVoiceWebSocket() {
     connectWatchdog = setTimeout(() => {
       connectWatchdog = null;
       if (sequence !== connectionSequence || state.connected || !state.connecting) return;
-      state.connecting = false;
-      state.reconnecting = false;
+      // The watchdog has to *end* the attempt, not just describe it. It used to
+      // only set the error, so a join-ticket fetch that resolved after the
+      // deadline still opened the socket and connected — the user was told the
+      // connection timed out and then silently joined anyway. disconnect() bumps
+      // connectionSequence, which turns every late continuation (fetch result,
+      // socket open, socket message) into a no-op, and preserveConnection keeps
+      // the form filled in for a retry.
+      disconnect(true);
       state.errorCode = "CONNECT_TIMEOUT";
       state.error = CONNECT_WATCHDOG_MESSAGE;
-      const socket = ws.value;
-      if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000);
     }, CONNECT_WATCHDOG_MS);
+  }
+
+  let reconnectWatchdog: ReturnType<typeof setTimeout> | null = null;
+
+  function clearReconnectWatchdog(): void {
+    if (reconnectWatchdog !== null) {
+      clearTimeout(reconnectWatchdog);
+      reconnectWatchdog = null;
+    }
+  }
+
+  /**
+   * Give the reconnect wait a deadline. See RECONNECT_WATCHDOG_MS.
+   *
+   * Re-arming is a no-op while one is pending, so the deadline covers the whole
+   * reconnect rather than restarting on every attempt message.
+   */
+  function armReconnectWatchdog(): void {
+    if (reconnectWatchdog !== null) return;
+    reconnectWatchdog = setTimeout(() => {
+      reconnectWatchdog = null;
+      if (!state.reconnecting) return;
+      // reconnectFailed (not a plain error) so the room keeps its "reconnect now"
+      // affordance instead of dropping the user back to the join form.
+      state.reconnecting = false;
+      state.reconnectFailed = true;
+      state.errorCode = "RECONNECT_TIMEOUT";
+      state.error = connectionFailureMessage("RECONNECT_TIMEOUT");
+    }, RECONNECT_WATCHDOG_MS);
   }
 
   function connect(target: string, channel: string, nickname: string, serverPassword = "", identity = "", rememberIdentity = false, inviteToken = "", accelerated = false, accelerationRelayId = ""): void {
@@ -1630,9 +1744,14 @@ export function useVoiceWebSocket() {
   }
 
   async function openTicketedConnection(sequence: number, target: string, channel: string, nickname: string, serverPassword: string, inviteToken: string, accelerated: boolean): Promise<void> {
+    // Bound the request: without this a stalled gateway left the fetch pending
+    // until the connect watchdog fired, and the late response still connected.
+    const controller = new AbortController();
+    const ticketTimeout = window.setTimeout(() => controller.abort(), JOIN_TICKET_TIMEOUT_MS);
     try {
       const response = await fetch("/api/join-ticket", {
         method: "POST",
+        signal: controller.signal,
         headers: { "content-type": "application/json", accept: "application/json" },
         body: JSON.stringify({ target, nickname, channel, serverPassword, ...(inviteToken ? { invite: inviteToken } : {}), ...(accelerated ? { accelerated: true, ...(lastConnection?.accelerationRelayId ? { accelerationRelayId: lastConnection.accelerationRelayId } : {}) } : {}), ...(lastConnection?.rememberIdentity && lastConnection.identity ? { identity: lastConnection.identity } : {}), ...(lastConnection?.rememberIdentity ? { rememberIdentity: true } : {}) }),
       });
@@ -1648,9 +1767,16 @@ export function useVoiceWebSocket() {
     } catch (error: unknown) {
       if (sequence !== connectionSequence) return;
       state.connecting = false;
+      // An aborted fetch reports an English DOMException message; use the
+      // explainable code instead of letting it reach the UI.
+      const aborted = error instanceof Error && error.name === "AbortError";
       const errorRecord = error && typeof error === "object" ? error as { code?: unknown } : {};
-      state.errorCode = normalizedClientErrorCode(errorRecord.code, "REQUEST_FAILED");
-      state.error = error instanceof Error ? error.message : connectionFailureMessage(state.errorCode);
+      state.errorCode = aborted ? "REQUEST_TIMEOUT" : normalizedClientErrorCode(errorRecord.code, "REQUEST_FAILED");
+      state.error = aborted || !(error instanceof Error)
+        ? connectionFailureMessage(state.errorCode)
+        : error.message;
+    } finally {
+      window.clearTimeout(ticketTimeout);
     }
   }
 
@@ -1679,6 +1805,7 @@ export function useVoiceWebSocket() {
     socket.onclose = (event) => {
       if (sequence !== connectionSequence) return;
       clearConnectWatchdog();
+      clearReconnectWatchdog();
       clearLatencyProbes();
       rejectPendingCommands(new Error("语音连接已关闭"));
       state.connected = false;
@@ -1688,9 +1815,21 @@ export function useVoiceWebSocket() {
       // Prefer the close code over the generic WebSocket error event. The
       // gateway uses a dedicated code when a remembered identity is already
       // active in another browser page.
-      if (event.code !== 1000 && !state.reconnectFailed && !state.errorCode) {
-        state.errorCode = closeErrorCode(event.code, event.reason);
-        state.error = closeReason(event.code, event.reason);
+      if (!state.reconnectFailed && !state.errorCode) {
+        // The gateway tears a session down with 1000 and puts its own reason in
+        // the close frame (admin-terminated, gateway-shutdown, heartbeat-timeout).
+        // Because the code is 1000 those used to produce no message at all, so an
+        // admin ending the session looked exactly like the user's own disconnect.
+        // A user-initiated disconnect never reaches here: disconnect() bumps
+        // connectionSequence before closing.
+        const reasonCode = event.code === 1000 ? GATEWAY_CLOSE_REASON_CODES[event.reason] : undefined;
+        if (reasonCode) {
+          state.errorCode = reasonCode;
+          state.error = connectionFailureMessage(reasonCode);
+        } else if (event.code !== 1000) {
+          state.errorCode = closeErrorCode(event.code, event.reason);
+          state.error = closeReason(event.code, event.reason);
+        }
       }
       stopWebRtcTransport();
       stopMicrophone();
@@ -1739,6 +1878,20 @@ export function useVoiceWebSocket() {
     1011: "GATEWAY_SESSION_ENDED",
   };
 
+  /**
+   * Gateway teardown reasons that arrive inside a *normal* (1000) close frame.
+   *
+   * voice-bridge closes with 1000 and the SessionTeardownReason as the reason
+   * string for everything it decides itself. Only the ones the user can act on
+   * are mapped; the rest (websocket-close, client-disconnect) are the user's own
+   * doing and stay silent.
+   */
+  const GATEWAY_CLOSE_REASON_CODES: Record<string, string> = {
+    "admin-terminated": "SESSION_TERMINATED_BY_ADMIN",
+    "gateway-shutdown": "GATEWAY_SHUTTING_DOWN",
+    "heartbeat-timeout": "GATEWAY_HEARTBEAT_LOST",
+  };
+
   function closeErrorCode(code: number, reason = ""): string {
     const closeCode = normalizedClientErrorCode(reason, "");
     // The gateway repeats the failure code in the close reason. Trust it when the
@@ -1780,6 +1933,7 @@ export function useVoiceWebSocket() {
     const socket = ws.value;
     ws.value = null;
     stopWebRtcTransport();
+    clearReconnectWatchdog();
     if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000);
     state.connected = false;
     state.connecting = false;
@@ -1829,6 +1983,7 @@ export function useVoiceWebSocket() {
       case "connected":
         const wasReconnecting = state.reconnecting;
         clearConnectWatchdog();
+        clearReconnectWatchdog();
         state.connected = true;
         state.connecting = false;
         state.reconnecting = false;
@@ -1968,6 +2123,7 @@ export function useVoiceWebSocket() {
         state.reconnecting = Boolean(msg.recoverable !== false);
         state.reconnectFailed = false;
         if (!state.reconnecting) state.error = "TeamSpeak 连接已断开";
+        else armReconnectWatchdog();
         stopWebRtcTransport();
         stopMicrophone();
         whisperTargetIds.clear();
@@ -1980,16 +2136,19 @@ export function useVoiceWebSocket() {
         state.reconnecting = true;
         state.reconnectFailed = false;
         state.reconnectAttempt = Number(msg.attempt) || state.reconnectAttempt + 1;
+        armReconnectWatchdog();
         stopWebRtcTransport();
         stopMicrophone();
         whisperTargetIds.clear();
         whisperActive.value = false;
         break;
       case "reconnected":
+        clearReconnectWatchdog();
         state.reconnecting = false;
         state.reconnectFailed = false;
         break;
       case "reconnectFailed":
+        clearReconnectWatchdog();
         state.connected = false;
         state.canMoveClients = false;
         state.connecting = false;
@@ -2002,6 +2161,7 @@ export function useVoiceWebSocket() {
         break;
       case "connectionFailed":
         clearConnectWatchdog();
+        clearReconnectWatchdog();
         state.connected = false;
         state.canMoveClients = false;
         state.connecting = false;
@@ -2306,6 +2466,10 @@ export function useVoiceWebSocket() {
     }
     const gain = remoteGains.get(clientId);
     if (gain) gain.gain.value = normalized * effectiveOutputVolume();
+    // SFU 下每个说话人一路 slot，成员音量落在该 slot 的 GainNode 上。只写
+    // volumes 不会立刻改变声音 —— 必须重算各 slot 的增益。缺这一步时，改音量
+    // 要等到下一次 applyOutputVolume()（例如切换自己的输出静音）才生效。
+    syncSfuVolumes();
     if (webrtcPeer || webrtcActive.value) sendCmd("setMemberVolume", { clientId, volume: normalized });
   }
 
@@ -2336,7 +2500,11 @@ export function useVoiceWebSocket() {
       await startMicrophone();
       if (shouldRestartWebRtc && ws.value) await startWebRtcTransport(connectionSequence, ws.value);
     } catch (error) {
+      // Same trap as setInputDevice: the transport was already torn down above,
+      // so a failure here must rebuild the path (including telling the gateway to
+      // drop the stale peer) rather than only reporting the error.
       setMicrophoneError(error);
+      await recoverAudioAfterFailedInputChange(shouldRestartWebRtc);
     }
   }
 

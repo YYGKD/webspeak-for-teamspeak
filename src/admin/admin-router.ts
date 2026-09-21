@@ -1,5 +1,5 @@
 import { Router, type NextFunction, type Request, type Response } from "express";
-import { existsSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readSync } from "node:fs";
 import type { Logger } from "../logger.js";
 import { AdminInputError, AdminService, type AdminSettingsInput, type RelayNodeInput } from "./admin-service.js";
 import { AdminSessionStore, isSecureRequest } from "./admin-session.js";
@@ -429,10 +429,41 @@ interface AdminLogEntry {
   context: Record<string, string | number | boolean>;
 }
 
+/**
+ * How much of the end of a log file the admin console reads.
+ *
+ * The log viewer and the session history only ever render the last few hundred
+ * entries, but they used to read and split the entire file — up to the 10 MB
+ * rotation cap, times four rotated files. readFileSync is synchronous and runs
+ * on the same event loop that carries every voice WebSocket, so one large log
+ * stalled live audio for the duration of the read. Read a bounded tail instead.
+ */
+const LOG_TAIL_BYTES = 512 * 1024;
+
+/** The last `maxBytes` of a log file, as whole lines. */
+function readLogTail(path: string, maxBytes = LOG_TAIL_BYTES): string[] {
+  const descriptor = openSync(path, "r");
+  try {
+    const size = fstatSync(descriptor).size;
+    const start = Math.max(0, size - maxBytes);
+    const length = size - start;
+    if (length <= 0) return [];
+    const buffer = Buffer.allocUnsafe(length);
+    const bytesRead = readSync(descriptor, buffer, 0, length, start);
+    const lines = buffer.subarray(0, bytesRead).toString("utf8").split(/\r?\n/).filter(Boolean);
+    // A tail read can begin mid-line (and mid-UTF-8-character); that first
+    // fragment is dropped unless we started at the beginning of the file.
+    if (start > 0) lines.shift();
+    return lines;
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
 function readRecentLogs(logFile: string | undefined, limit: number): AdminLogEntry[] {
   if (!logFile) return [];
   try {
-    const lines = readFileSync(logFile, "utf8").split(/\r?\n/).filter(Boolean).slice(-limit);
+    const lines = readLogTail(logFile).slice(-limit);
     return lines.map((line) => {
       try {
         const raw = JSON.parse(line) as Record<string, unknown>;
@@ -575,7 +606,7 @@ function readStructuredLogs(logFile: string): StructuredLogEntry[] {
   for (const path of paths) {
     if (!existsSync(path)) continue;
     try {
-      for (const line of readFileSync(path, "utf8").split(/\r?\n/).filter(Boolean)) {
+      for (const line of readLogTail(path)) {
         try {
           const raw = JSON.parse(line) as Record<string, unknown>;
           entries.push({

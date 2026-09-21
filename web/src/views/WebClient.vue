@@ -198,7 +198,7 @@
                 <div :class="['member-avatar', { speaking: isSpeaking(member) }]" :style="avatarStyle(member.nickname, member.isSelf, member.avatar)">{{ member.avatar ? '' : avatarInitial(member.nickname) }}<span class="member-presence"></span></div>
                 <div class="member-copy"><strong>{{ memberDisplayName(member) }}</strong><span>{{ member.away ? t('away') : isSpeaking(member) ? t('speaking') : member.isSelf ? t('yourDevice') : t('memberOnline') }}</span></div>
                 <div class="member-flags" :aria-label="t('memberStates')"><span v-if="member.away" :title="t('away')" :aria-label="t('away')"><Icon name="clock" :size="13" /></span><span v-if="member.inputMuted" :title="t('inputMuted')" :aria-label="t('inputMuted')"><Icon name="mic-off" :size="13" /></span><span v-if="member.outputMuted" :title="t('outputMuted')" :aria-label="t('outputMuted')"><Icon name="volume-off" :size="13" /></span><span v-if="member.channelCommander" :title="t('channelCommander')" :aria-label="t('channelCommander')"><Icon name="shield" :size="13" /></span></div>
-                <div class="member-volume"><Icon :name="(volumes[member.id] ?? 1) === 0 ? 'volume-off' : 'volume'" :size="14" /><input type="range" min="0" max="400" :value="(volumes[member.id] ?? 1) * 100" :style="rangeStyle((volumes[member.id] ?? 1) / 4, 1)" :aria-label="t('memberVolume')" @input="onVolInput(member.id, $event)" /></div>
+                <div class="member-volume" @pointerdown="suppressMemberDragFromVolume" @pointerup="clearMemberDragSuppression" @pointercancel="clearMemberDragSuppression"><Icon :name="(volumes[member.id] ?? 1) === 0 ? 'volume-off' : 'volume'" :size="14" /><input type="range" min="0" max="400" :value="(volumes[member.id] ?? 1) * 100" :style="rangeStyle((volumes[member.id] ?? 1) / 4, 1)" :aria-label="t('memberVolume')" @input="onVolInput(member.id, $event)" /></div>
                 <button v-if="isMobileViewport && !member.isSelf" type="button" class="member-action-button" :aria-label="t('moreMemberOptions')" @click.stop="openMemberActions(member)"><Icon name="more" :size="18" /></button>
               </div>
             </div>
@@ -322,6 +322,7 @@ import LanguageSwitcher from "../components/LanguageSwitcher.vue";
 import { useVoiceWebSocket, setWebRtcIceServers, type ChannelInfo, type ChannelMember, type ChatMessage, type LatencyProbeResult, type MediaPathStats } from "../composables/useVoiceWebSocket.js";
 import { clearLocalData as clearStoredLocalData, isLocalPersistenceAvailable, listFavorites, listRecentServers, loadLocalPreferences, loadStoredIdentity, recordRecentServer, removeFavorite, removeStoredIdentity, saveFavorite, saveLocalPreferences, saveStoredIdentity, type FavoriteServer, type RecentServer } from "../services/local-persistence.js";
 import { applyTheme, getStoredTheme, isDarkTheme, nextTheme, saveTheme, type ThemeMode } from "../services/theme.js";
+import { applyDocumentLanguage } from "../services/document-language.js";
 import { combineTeamSpeakTarget, DEFAULT_TEAM_SPEAK_PORT, isValidTeamSpeakPort, splitTeamSpeakTarget } from "../services/teamspeak-target.js";
 
 interface TreeChannel extends ChannelInfo {
@@ -447,6 +448,15 @@ const MENU_VIEWPORT_MARGIN = 12;
 const draggedMember = ref<ChannelMember | null>(null);
 const dragOverChannelId = ref("");
 const memberPointerDrag = reactive({ member: null as ChannelMember | null, pointerId: null as number | null, startX: 0, startY: 0, active: false, targetChannelId: "" });
+/**
+ * 手势起自音量条时抑制这一行的原生拖动。
+ *
+ * 成员行是 draggable 的，而 range 滑块在行内：在滑块上按下并移动，浏览器会把
+ * 手势判成"拖动这一行"，此时 dragstart 的 target 是**整行**而不是 input
+ * （实测确认），所以没法在 dragstart 里用 event.target 区分来源，只能在按下
+ * 位置预先打标记。没有管理员权限时行不可拖，因此这个问题只在有权限时出现。
+ */
+let suppressMemberDrag = false;
 const mobileSection = ref<"channels" | "chat" | "voice" | "more">("channels");
 const isMobileViewport = ref(false);
 const whisperPttActive = ref(false);
@@ -1694,6 +1704,11 @@ function localizedMessage(message: string) {
     "TeamSpeak 服务器正在关闭，暂时无法连接": "The TeamSpeak server is shutting down and is unreachable right now",
     "TeamSpeak 服务器未能完成连接初始化，请检查地址、端口或稍后重试": "The TeamSpeak server could not finish initialising the connection. Check the address and port, or try again shortly",
     "TeamSpeak 服务器拒绝了参数，通常是昵称长度或格式不合规": "The TeamSpeak server rejected the parameters, usually because the nickname length or format is invalid",
+    "向语音网关申请会话票据超时，请检查网络后重试": "The voice gateway did not issue a session ticket in time. Check your network and try again",
+    "重连语音网关超时：网关长时间没有响应，请重新进入语音空间": "Reconnecting to the voice gateway timed out: the gateway stopped responding. Enter the voice space again",
+    "管理员已结束你的语音会话": "An administrator ended your voice session",
+    "语音网关正在重启，请稍后重新进入语音空间": "The voice gateway is restarting. Enter the voice space again shortly",
+    "与语音网关的连接已失去响应，请重新进入语音空间": "The voice gateway stopped responding. Enter the voice space again",
   };
   if (language.value === "en" && exact[message]) return exact[message];
   if (message.startsWith("麦克风访问失败：")) {
@@ -1783,12 +1798,23 @@ function localizedMessage(message: string) {
       "成员已离线或当前不可见": "Das Mitglied ist offline oder nicht mehr sichtbar",
       "成员已离线": "Das Mitglied ist offline",
       "操作失败": "Operation fehlgeschlagen",
+      "向语音网关申请会话票据超时，请检查网络后重试": "Das Sprach-Gateway hat kein Sitzungsticket rechtzeitig ausgestellt. Prüfe dein Netzwerk und versuche es erneut",
+      "重连语音网关超时：网关长时间没有响应，请重新进入语音空间": "Zeitüberschreitung beim Neuverbinden mit dem Sprach-Gateway: Das Gateway antwortet nicht mehr. Tritt dem Sprachraum erneut bei",
+      "管理员已结束你的语音会话": "Ein Administrator hat deine Sprachsitzung beendet",
+      "语音网关正在重启，请稍后重新进入语音空间": "Das Sprach-Gateway wird neu gestartet. Tritt dem Sprachraum gleich erneut bei",
+      "与语音网关的连接已失去响应，请重新进入语音空间": "Die Verbindung zum Sprach-Gateway antwortet nicht mehr. Tritt dem Sprachraum erneut bei",
     };
     if (german[message]) return german[message];
     if (message.startsWith("麦克风访问失败：")) return `Mikrofonzugriff fehlgeschlagen: ${message.slice(8)}`;
     if (message.startsWith("麦克风声音未能发送：")) return `Mikrofon-Audio konnte nicht gesendet werden: ${message.slice(10)}`;
     if (message.startsWith("音频链路异常")) return message.replace("音频链路异常", "Audioverbindung fehlerhaft");
+    // Fall back to the English map, then to a German generic sentence. Falling
+    // through to the shared tail below used to hand a German UI the raw Chinese
+    // string whenever a message was missing from this map.
+    return exact[message] ?? "Vorgang fehlgeschlagen. Prüfe Eingaben, Netzwerk und Serverstatus";
   }
+  // 俄/日/英：本语言表 → 英文表 → 本语言通用句。errorCode 由模板单独渲染，
+  // 所以通用句不会让用户失去可排查的信息。
   if (language.value === "ru") return exact[message] ?? "Не удалось выполнить операцию. Проверьте ввод, сеть и состояние сервера";
   if (language.value === "ja") return exact[message] ?? "操作に失敗しました。入力、ネットワーク、サーバーの状態を確認してください";
   return exact[message] ?? message;
@@ -1828,6 +1854,18 @@ function localizedAudioNotice(code: string, message: string) {
       ru: `Не удалось кодировать звук микрофона (код ошибки: ${normalizedCode}). Другие участники могут вас не слышать`,
       ja: `マイク音声をエンコードできませんでした（エラーコード: ${normalizedCode}）。他のメンバーに音声が届かない可能性があります`,
     },
+    AUDIO_PATH_REBUILD_FAILED: {
+      en: "The audio path could not be rebuilt and the microphone did not come back. Check the device and the browser permissions",
+      de: "Der Audiopfad konnte nicht wiederhergestellt werden und das Mikrofon ist nicht zurückgekehrt. Prüfe Gerät und Browserberechtigungen",
+      ru: "Не удалось восстановить аудиотракт, микрофон не вернулся. Проверьте устройство и разрешения браузера",
+      ja: "音声経路を再構築できず、マイクが復帰しませんでした。デバイスとブラウザの権限を確認してください",
+    },
+    AUDIO_REALTIME_NOT_RESTORED: {
+      en: "The audio path could not be rebuilt. The compatibility transport is active and realtime voice was not restored; enter the voice space again",
+      de: "Der Audiopfad konnte nicht wiederhergestellt werden. Der Kompatibilitätstransport ist aktiv und Echtzeitstimme wurde nicht wiederhergestellt; tritt dem Sprachraum erneut bei",
+      ru: "Не удалось восстановить аудиотракт. Используется совместимый транспорт, голосовая связь в реальном времени не восстановлена; войдите в голосовое пространство заново",
+      ja: "音声経路を再構築できませんでした。互換トランスポートが有効で、リアルタイム音声は復帰していません。音声スペースに入り直してください",
+    },
   };
   const locale = language.value === "de" ? "de" : language.value === "ru" ? "ru" : language.value === "ja" ? "ja" : "en";
   return messages[code]?.[locale] ?? localizedMessage(message);
@@ -1846,6 +1884,10 @@ function persistLanguage() {
   localStorage.setItem("webspeak:language", language.value);
   void saveLocalPreferences({ schemaVersion: 1, language: language.value });
 }
+
+// Keep <html lang> in step with the UI language (immediate, so the hardcoded
+// zh-CN in index.html is corrected on first paint).
+watch(language, (value) => applyDocumentLanguage(value), { immediate: true });
 
 function cycleTheme() {
   themeMode.value = nextTheme(themeMode.value);
@@ -2319,7 +2361,7 @@ function doShare() {
   invite.searchParams.delete("server");
   if (accessMode.value === "open" && serverHost.value.trim()) invite.searchParams.set("server", currentServerTarget());
   if (channel.value) invite.searchParams.set("channel", channel.value);
-  navigator.clipboard?.writeText(invite.toString()).then(() => showToast(t("copiedToast")), () => showToast(t("copyFailedToast")));
+  void copyWithToast(invite.toString(), t("copiedToast"));
 }
 
 const canJoin = computed(() => Boolean(
@@ -2576,7 +2618,21 @@ async function moveMemberDirect(member: ChannelMember, targetChannelId: string):
   }
 }
 
+function suppressMemberDragFromVolume(): void {
+  suppressMemberDrag = true;
+}
+
+function clearMemberDragSuppression(): void {
+  suppressMemberDrag = false;
+}
+
 function onMemberDragStart(member: ChannelMember, event: DragEvent): void {
+  // 这一次手势起自音量条：不拖动成员，把事件让给滑块。
+  if (suppressMemberDrag) {
+    suppressMemberDrag = false;
+    event.preventDefault();
+    return;
+  }
   if (member.isSelf || !voiceState.canMoveClients) {
     event.preventDefault();
     if (!member.isSelf) showToast(t("movePermissionDenied"));
@@ -2591,6 +2647,7 @@ function onMemberDragStart(member: ChannelMember, event: DragEvent): void {
 function onMemberDragEnd(): void {
   draggedMember.value = null;
   dragOverChannelId.value = "";
+  suppressMemberDrag = false;
 }
 
 function onMemberPointerDown(member: ChannelMember, event: PointerEvent): void {
@@ -2699,7 +2756,7 @@ function pokeMember(member: ChannelMember): void {
 }
 
 function copyMemberName(member: ChannelMember): void {
-  navigator.clipboard?.writeText(member.nickname).then(() => showToast(t("copiedNickname")), () => showToast(t("copyFailedToast")));
+  void copyWithToast(member.nickname, t("copiedNickname"));
 }
 
 function toggleAway(): void {
@@ -2722,6 +2779,52 @@ function showToast(message: string) {
   toast.value = message;
   if (toastTimer) clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { toast.value = ""; }, 2800);
+}
+
+/**
+ * Copy text to the clipboard, with a fallback for insecure contexts.
+ *
+ * navigator.clipboard only exists in a secure context, and plain-HTTP
+ * deployments are supported on purpose (checkSupport() warns about HTTPS but
+ * does not refuse to run). The call shape used before —
+ * `navigator.clipboard?.writeText(x).then(...)` — short-circuits to undefined on
+ * HTTP and then throws a TypeError on `.then`, so both copy buttons failed with
+ * an uncaught error instead of showing the failure toast. Fall back to a
+ * temporary selection plus execCommand, which is deprecated but remains the only
+ * option outside a secure context.
+ */
+async function copyTextToClipboard(text: string): Promise<boolean> {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // Denied permission or an inactive document: try the legacy path.
+    }
+  }
+  try {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    // Keep it out of the layout and out of the scroll position, but focusable
+    // so the selection can actually be made.
+    textarea.style.position = "fixed";
+    textarea.style.top = "-1000px";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    try {
+      textarea.select();
+      return document.execCommand("copy");
+    } finally {
+      textarea.remove();
+    }
+  } catch {
+    return false;
+  }
+}
+
+async function copyWithToast(text: string, successMessage: string): Promise<void> {
+  showToast((await copyTextToClipboard(text)) ? successMessage : t("copyFailedToast"));
 }
 
 function avatarInitial(name: string) {

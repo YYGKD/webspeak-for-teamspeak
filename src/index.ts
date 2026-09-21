@@ -19,7 +19,7 @@ async function main() {
     await runRelayMode();
     return;
   }
-  const [{ createLogger }, { createWebServer }, { APP_PORT }, { WebSpeakDatabase }, { loadOrCreateMasterSecret }, { AdminService }, { JoinTicketStore }] = await Promise.all([
+  const [{ createLogger }, { createWebServer }, { APP_PORT }, { WebSpeakDatabase, resolveAuditRetentionDays }, { loadOrCreateMasterSecret }, { AdminService }, { JoinTicketStore }] = await Promise.all([
     import("./logger.js"),
     import("./server/server.js"),
     import("./constants.js"),
@@ -41,6 +41,14 @@ async function main() {
   );
   await adminService.initialize();
   removeObsoleteBootstrapFile();
+  // audit_events and managed_invites are append-only and were never pruned, so
+  // both the file and the /audit + /invites responses grew without bound. Apply
+  // the retention window once at startup (WEBSPEAK_AUDIT_RETENTION_DAYS).
+  const retentionDays = resolveAuditRetentionDays();
+  const pruned = database.pruneExpiredRecords(retentionDays);
+  if (pruned.auditEvents || pruned.managedInvites) {
+    logger.info({ retentionDays, ...pruned }, "Pruned records past the retention window");
+  }
   const joinTickets = new JoinTicketStore();
 
   logger.info({ dataDir: DATA_DIR }, "Starting WebSpeak server");

@@ -197,13 +197,20 @@ export class AdminService {
     const relayNodes = input.relayNodes === undefined ? undefined : this.normalizeRelayNodes(input.relayNodes);
     const settings = this.normalizeSettings(input, current, relayNodes);
     const targetChanged = current.tsHost !== settings.tsHost || current.tsPort !== settings.tsPort;
-    this.database.updateSettings(settings);
-    if (relayNodes !== undefined) {
-      this.database.replaceRelayNodes(relayNodes);
-    } else if (input.relaySettingsAction && input.relaySettingsAction !== "keep") {
-      this.database.replaceRelayNodes(this.legacyRelayNodesFromSettings(settings));
-    }
-    if (targetChanged) this.database.clearConnectionTest();
+    // The settings row, the relay node table and the cleared connection-test
+    // result are one configuration change. Written as three separate statements
+    // (the previous shape) a failure in the middle left relay_nodes describing
+    // the previous setup while the settings row already described the new one.
+    // Decide what to write here; commit it atomically in one place.
+    const relayNodesToWrite = relayNodes !== undefined
+      ? relayNodes
+      : input.relaySettingsAction && input.relaySettingsAction !== "keep"
+        ? this.legacyRelayNodesFromSettings(settings)
+        : null;
+    this.database.updateSettings(settings, {
+      ...(relayNodesToWrite ? { relayNodes: relayNodesToWrite } : {}),
+      ...(targetChanged ? { clearConnectionTest: true } : {}),
+    });
   }
 
   getConnectionPolicy(): ConnectionPolicy {
@@ -609,7 +616,7 @@ export class AdminService {
         relayHost: current.relayHost,
         relayPort: current.relayPort,
         relayTokenEncrypted: current.relayTokenEncrypted,
-      }, "LEGACY_CONFIG_IMPORTED");
+      }, { auditEvent: "LEGACY_CONFIG_IMPORTED" });
       this.database.setMeta("legacy_config_imported", "1");
       this.database.setMeta("legacy_import_notice_pending", "1");
       this.logger.info("Legacy config imported; WebSpeak settings are now managed from /admin");

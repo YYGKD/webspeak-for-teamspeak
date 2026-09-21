@@ -7,6 +7,18 @@ import type { TeamSpeakProtocol } from "../server/teamspeak-adapter.js";
 import { DEFAULT_WEBRTC_UDP_PORT_RANGE } from "../server/webrtc-config.js";
 
 export const DATABASE_SCHEMA_VERSION = 7;
+
+/** How long audit events and expired invites are kept by default. */
+export const DEFAULT_AUDIT_RETENTION_DAYS = 90;
+
+/** Retention window for pruneExpiredRecords(), overridable via the environment. */
+export function resolveAuditRetentionDays(): number {
+  const raw = process.env.WEBSPEAK_AUDIT_RETENTION_DAYS?.trim();
+  if (!raw) return DEFAULT_AUDIT_RETENTION_DAYS;
+  const value = Number(raw);
+  return Number.isInteger(value) && value >= 1 && value <= 3650 ? value : DEFAULT_AUDIT_RETENTION_DAYS;
+}
+
 export type AccessMode = "fixed" | "open";
 
 export interface PersistedSettings {
@@ -68,6 +80,15 @@ export interface PersistedRelayNode {
   createdAt: string;
   updatedAt: string;
 }
+
+/**
+ * A relay node as written back to storage. The timestamps are optional because
+ * callers that rebuild the table from settings do not track them.
+ */
+export type RelayNodeWrite = Omit<PersistedRelayNode, "createdAt" | "updatedAt"> & {
+  createdAt?: string;
+  updatedAt?: string;
+};
 
 export interface ManagedInviteRecord {
   id: string;
@@ -143,7 +164,14 @@ export class WebSpeakDatabase {
     mkdirSync(dirname(path), { recursive: true });
     const existed = existsSync(path);
     this.database = new DatabaseSync(path);
-    this.database.exec("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
+    // busy_timeout 必须走 PRAGMA，不能用 DatabaseSync 的 `timeout` 构造选项：
+    // 那个选项直到 Node 22.16 / 24.0 才存在，而本项目的 engines 下限是 22.5。
+    // PRAGMA 是 SQLite 自身的设置，各版本行为一致。
+    //
+    // 默认值 0 意味着"锁被占用立刻报错"而不是等待：部署重叠、外部只读连接、
+    // VACUUM INTO 期间的并发写都会直接抛 SQLITE_BUSY。node:sqlite 是同步 API，
+    // 抛错会直接冒到调用方（例如管理接口），5 秒等待足够覆盖正常的短事务。
+    this.database.exec("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;");
     this.migrate(existed);
   }
 
@@ -191,7 +219,11 @@ export class WebSpeakDatabase {
   }
 
   getSettings(): PersistedSettings {
-    const row = this.database.prepare("SELECT * FROM settings WHERE id = 1").get() as SettingsRow;
+    const row = this.database.prepare("SELECT * FROM settings WHERE id = 1").get() as SettingsRow | undefined;
+    // The singleton row is seeded by the v1 migration, so a missing row means the
+    // database was damaged or tampered with. Say that instead of letting the
+    // property reads below raise "Cannot read properties of undefined".
+    if (!row) throw new Error("WebSpeak settings row is missing from the database");
     return {
       siteName: row.site_name,
       welcomeText: row.welcome_text,
@@ -236,34 +268,28 @@ export class WebSpeakDatabase {
     }));
   }
 
-  replaceRelayNodes(nodes: Array<Omit<PersistedRelayNode, "createdAt" | "updatedAt"> & { createdAt?: string; updatedAt?: string }>): void {
-    const now = new Date().toISOString();
-    this.transaction(() => {
-      this.database.exec("DELETE FROM relay_nodes");
-      const insert = this.database.prepare(
-        `INSERT INTO relay_nodes (id, name, enabled, host, port, token_encrypted, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      );
-      for (const node of nodes) {
-        insert.run(
-          node.id,
-          node.name,
-          node.enabled ? 1 : 0,
-          node.host,
-          node.port,
-          node.tokenEncrypted,
-          node.createdAt ?? now,
-          node.updatedAt ?? now,
-        );
-      }
-    });
-  }
-
-  updateSettings(settings: SettingsUpdate, auditEvent = "SETTINGS_CHANGED"): void {
+  /**
+   * Settings, relay nodes and the connection-test reset must land together.
+   *
+   * They used to be three independent writes (settings row, relay_nodes table,
+   * then a bare UPDATE clearing the test result). A failure in the middle left
+   * the settings row describing one configuration while relay_nodes still held
+   * the previous one — inconsistent state, no rollback, and the cleared test
+   * result was not even audited.
+   *
+   * `relayNodes: []` clears the table; omit it (or pass null) to leave the relay
+   * nodes untouched.
+   */
+  updateSettings(
+    settings: SettingsUpdate,
+    options: { auditEvent?: string; relayNodes?: RelayNodeWrite[] | null; clearConnectionTest?: boolean } = {},
+  ): void {
     const now = new Date().toISOString();
     this.transaction(() => {
       this.writeSettings(settings, now);
-      this.insertAudit(auditEvent, { accessMode: settings.accessMode, target: `${settings.tsHost}:${settings.tsPort}` }, now);
+      this.insertAudit(options.auditEvent ?? "SETTINGS_CHANGED", { accessMode: settings.accessMode, target: `${settings.tsHost}:${settings.tsPort}` }, now);
+      if (options.relayNodes) this.writeRelayNodes(options.relayNodes, now);
+      if (options.clearConnectionTest) this.clearConnectionTest();
     });
   }
 
@@ -389,12 +415,44 @@ export class WebSpeakDatabase {
     return rows.map((row) => ({ event: row.event, createdAt: row.created_at }));
   }
 
+  /**
+   * Retention for the two append-only tables.
+   *
+   * Neither table was ever pruned: every login attempt, settings change and
+   * consumed invite added a row that stayed forever, so the database file and
+   * the /audit + /invites responses grew without bound. Deletion is bounded by
+   * an explicit retention window and runs at startup.
+   *
+   * An invite is only removed once it is past its own expiry *and* past the
+   * retention window, so the admin console keeps a usable history of recent
+   * invites. Deleted pages are reused by later inserts, so the file stabilises
+   * instead of shrinking (no VACUUM is run — that would block the event loop).
+   */
+  pruneExpiredRecords(retentionDays: number, now = Date.now()): { auditEvents: number; managedInvites: number } {
+    const days = Number.isFinite(retentionDays) ? Math.max(1, Math.floor(retentionDays)) : DEFAULT_AUDIT_RETENTION_DAYS;
+    // created_at / expires_at are ISO-8601 UTC strings, so a string comparison
+    // orders them correctly without parsing every row.
+    const cutoff = new Date(now - days * 86_400_000).toISOString();
+    let auditEvents = 0;
+    let managedInvites = 0;
+    this.transaction(() => {
+      auditEvents = Number((this.database.prepare("DELETE FROM audit_events WHERE created_at < ?").run(cutoff) as { changes?: number | bigint }).changes ?? 0);
+      managedInvites = Number((this.database.prepare("DELETE FROM managed_invites WHERE expires_at < ?").run(cutoff) as { changes?: number | bigint }).changes ?? 0);
+    });
+    return { auditEvents, managedInvites };
+  }
+
   private migrate(existed: boolean): void {
     let version = this.schemaVersion;
     if (version > DATABASE_SCHEMA_VERSION) {
       throw new Error(`Database schema ${version} is newer than this WebSpeak build`);
     }
     if (existed && version > 0) {
+      // WAL 模式下最近提交的事务可能还只在 -wal 文件里。直接复制主库文件会得到
+      // 一个"少了几笔已提交写入"的备份 —— 而它正是迁移失败后要依赖的东西。
+      // 先 checkpoint 把 WAL 合并回主库，再复制，备份才是完整一致的。
+      // （exportBackup() 用 VACUUM INTO，本来就不受这个问题影响。）
+      this.database.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get();
       copyFileSync(this.path, `${this.path}.schema-${version}.bak`);
     }
     if (version === 0) {
@@ -557,6 +615,26 @@ export class WebSpeakDatabase {
         `);
         this.database.exec("PRAGMA user_version = 7");
       });
+    }
+  }
+
+  private writeRelayNodes(nodes: RelayNodeWrite[], now: string): void {
+    this.database.exec("DELETE FROM relay_nodes");
+    const insert = this.database.prepare(
+      `INSERT INTO relay_nodes (id, name, enabled, host, port, token_encrypted, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (const node of nodes) {
+      insert.run(
+        node.id,
+        node.name,
+        node.enabled ? 1 : 0,
+        node.host,
+        node.port,
+        node.tokenEncrypted,
+        node.createdAt ?? now,
+        node.updatedAt ?? now,
+      );
     }
   }
 

@@ -249,11 +249,23 @@ export function normalizeTeamSpeakError(error: unknown): WebSpeakError {
   if (/version.{0,25}(outdated|out of date|too old|not allowed|unsupported)|outdated.{0,25}version/.test(text)) {
     return createTeamSpeakError("client_version_outdated", error, diagnostics);
   }
+  // 顺序有意如此：封禁是终态，洪水防护是可重试的。以前先判 flood，于是
+  // "原因里提到 flood 的纯文本封禁" 会被归为 flooding —— 那是可重试的
+  // （见 NON_RETRYABLE_CODES），客户端于是反复重连、每次撞上同一个封禁。
+  //
+  // A ban is terminal while flood protection is retryable, so the ban markers
+  // must be evaluated first. The ambiguous "you may retry in" phrasing is used
+  // by both notices, so it is checked last and keeps the retryable reading:
+  // treating a flood notice as terminal strands the user, while treating a ban
+  // as retryable only costs one extra attempt.
+  if (/\bban(ned)?\b|blacklist/.test(text)) {
+    return createTeamSpeakError("banned", error, diagnostics);
+  }
   if (/flood/.test(text)) {
     return createTeamSpeakError("flooding", error, diagnostics);
   }
-  if (/\bban(ned)?\b|blacklist|you may retry in/.test(text)) {
-    return createTeamSpeakError("banned", error, diagnostics);
+  if (/you may retry in/.test(text)) {
+    return createTeamSpeakError("flooding", error, diagnostics);
   }
   if (/kicked/.test(text)) {
     return createTeamSpeakError("kicked", error, diagnostics);

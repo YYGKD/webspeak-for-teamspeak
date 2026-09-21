@@ -75,6 +75,7 @@ import Icon from "../components/Icon.vue";
 import LanguageSwitcher from "../components/LanguageSwitcher.vue";
 import { combineTeamSpeakTarget, splitTeamSpeakTarget } from "../services/teamspeak-target.js";
 import { applyTheme, getStoredTheme, isDarkTheme, nextTheme, saveTheme, type ThemeMode } from "../services/theme.js";
+import { applyDocumentLanguage } from "../services/document-language.js";
 
 type Language = "zh" | "en" | "de" | "ru" | "ja";
 type Screen = "login" | "change-password" | "admin";
@@ -1023,6 +1024,9 @@ function serverPayload() { return { target: combineTeamSpeakTarget(serverForm.ad
 async function runTest(url: string, body: Record<string, unknown>) { testing.value = true; errorMessage.value = ""; testResult.value = null; try { testResult.value = await sendJson(url, "POST", body, url.includes("/server/test")); } catch (error) { testResult.value = { ok: false, code: (error as ApiError).code }; } finally { testing.value = false; } }
 async function dismissLegacyNotice() { await sendJson("/api/admin/legacy-import/dismiss", "POST", {}); overview.legacyConfigImported = false; }
 function persistLanguage() { localStorage.setItem("webspeak:language", language.value); }
+// Keep <html lang> in step with the UI language (immediate, so the hardcoded
+// zh-CN in index.html is corrected on first paint).
+watch(language, (value) => applyDocumentLanguage(value), { immediate: true });
 function cycleTheme() { themeMode.value = nextTheme(themeMode.value); saveTheme(themeMode.value); }
 function formatDate(value: string | null) { return value ? new Intl.DateTimeFormat(language.value === "zh" ? "zh-CN" : language.value === "de" ? "de-DE" : language.value === "ru" ? "ru-RU" : language.value === "ja" ? "ja-JP" : "en-US", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value)) : "—"; }
 function formatUptime(seconds: number) { const hours = Math.floor(seconds / 3600); const minutes = Math.floor((seconds % 3600) / 60); if (language.value === "zh") return `已运行 ${hours} 小时 ${minutes} 分钟`; if (language.value === "de") return `${hours} Std. ${minutes} Min. aktiv`; if (language.value === "ru") return `Работает ${hours} ч ${minutes} мин`; if (language.value === "ja") return `${hours}時間 ${minutes}分 稼働`; return `Up ${hours}h ${minutes}m`; }

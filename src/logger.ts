@@ -17,9 +17,24 @@ export interface Logger {
   child(bindings: Record<string, unknown>): Logger;
 }
 
+const LOG_LEVELS = ["fatal", "error", "warn", "info", "debug", "trace"] as const;
+
+/**
+ * Minimum level written to the log.
+ *
+ * Defaults to "debug" — the value that used to be hardcoded — so existing
+ * deployments keep the same output. WEBSPEAK_LOG_LEVEL lets an operator turn the
+ * per-frame diagnostics down (or up) without a rebuild; an unrecognised value
+ * falls back to the default instead of silencing the log.
+ */
+export function resolveLogLevel(): string {
+  const raw = process.env.WEBSPEAK_LOG_LEVEL?.trim().toLowerCase();
+  return raw && (LOG_LEVELS as readonly string[]).includes(raw) ? raw : "debug";
+}
+
 export function createLogger(logDir?: string): Logger {
   const loggerOptions = {
-    level: "debug",
+    level: resolveLogLevel(),
     timestamp: pino.stdTimeFunctions.isoTime,
     redact: {
       paths: ["password", "*.password", "serverPassword", "*.serverPassword", "token", "*.token", "identity", "*.identity"],
@@ -63,7 +78,9 @@ function createFileLogger(options: { level: string; timestamp: typeof pino.stdTi
   mkdirSync(logPath.replace(/[\\/][^\\/]+$/, ""), { recursive: true });
   return pino(options, pino.multistream([
     { level: "info", stream: process.stdout },
-    { level: "debug", stream: new RotatingFileStream(logPath) },
+    // The file gets everything the configured level allows; hardcoding "debug"
+    // here silently dropped trace-level records when an operator raised it.
+    { level: options.level, stream: new RotatingFileStream(logPath) },
   ]));
 }
 
