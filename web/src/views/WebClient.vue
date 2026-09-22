@@ -202,8 +202,8 @@
 
             <section :class="['chat-panel', { 'mobile-section-hidden': mobileSection !== 'chat' }]">
               <div class="chat-tabs" role="tablist" :aria-label="t('chatTabs')">
-                <button type="button" :class="{ active: chatTab === 'channel' }" @click="chatTab = 'channel'"><Icon name="hash" :size="15" /> {{ currentChannelName }}</button>
                 <button type="button" :class="{ active: chatTab === 'description' }" @click="chatTab = 'description'"><Icon name="info" :size="15" /> {{ t('channelDescription') }}</button>
+                <button type="button" :class="{ active: chatTab === 'channel' }" @click="chatTab = 'channel'"><Icon name="hash" :size="15" /> {{ currentChannelName }}</button>
                 <button type="button" :class="{ active: chatTab === 'server' }" @click="chatTab = 'server'"><Icon name="server" :size="15" /> {{ t('serverChat') }}</button>
                 <button v-for="conversation in privateConversations" :key="conversation.id" type="button" :class="{ active: chatTab === 'private' && privateClientId === conversation.id }" @click="openPrivateChat(conversation.id)"><Icon name="message" :size="15" /> {{ conversation.name }}</button>
                 <button type="button" :class="{ active: chatTab === 'events' }" @click="chatTab = 'events'"><Icon name="bell" :size="15" /> {{ t('eventLog') }}</button>
@@ -524,7 +524,7 @@ function setScreenVideoElement(element: unknown): void {
 }
 const localPersistenceAvailable = isLocalPersistenceAvailable();
 const identityReady = ref(!localPersistenceAvailable);
-const chatTab = ref<"channel" | "description" | "server" | "private" | "events">("channel");
+const chatTab = ref<"channel" | "description" | "server" | "private" | "events">("description");
 const privateClientId = ref(0);
 const away = ref(false);
 const awayMessage = ref("");
@@ -2659,7 +2659,8 @@ function cancelServerPassword() {
 function selectChannel(item: TreeChannel) {
   selectedChannelId.value = item.id;
   channel.value = item.name;
-  chatTab.value = "channel";
+  // 默认视图是「频道说明」：换频道也先看新频道的说明（与进入时的默认保持一致）。
+  chatTab.value = "description";
   switchChannel(item.id);
 }
 

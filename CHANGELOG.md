@@ -4,23 +4,23 @@
 
 ### 中文
 
-- 新增「频道说明」标签：频道页面在「服务器」标签之前展示当前频道的说明文本，支持 TeamSpeak 说明中的加粗、斜体、下划线、删除线、颜色与链接，正文里普通的方括号保持不变；频道未填写说明时给出引导空态。说明按需通过 `channelinfo` 读取，因此在没有频道列表权限的服务器上也能正常显示。
+- 新增「频道说明」标签：作为频道页面的默认视图排在标签栏最前，进入频道即展示当前频道的说明文本，支持 TeamSpeak 说明中的加粗、斜体、下划线、删除线、颜色与链接，正文里普通的方括号保持不变；频道未填写说明时给出引导空态。说明按需通过 `channelinfo` 读取，因此在没有频道列表权限的服务器上也能正常显示。
 
 ### English
 
-- Added a “Channel description” tab: the channel page now shows the current channel's description before the server tab, rendering TeamSpeak's bold, italic, underline, strike-through, color, and link markup while leaving ordinary bracketed text untouched; a guiding empty state appears when the channel has no description. Descriptions are fetched on demand through `channelinfo`, so servers without channel-list permission keep working.
+- Added a “Channel description” tab: it leads the tab strip as the channel page's default view and shows the current channel's description as soon as you enter, rendering TeamSpeak's bold, italic, underline, strike-through, color, and link markup while leaving ordinary bracketed text untouched; a guiding empty state appears when the channel has no description. Descriptions are fetched on demand through `channelinfo`, so servers without channel-list permission keep working.
 
 ### Deutsch
 
-- Neuer Tab „Kanalbeschreibung“: Die Kanalseite zeigt die Beschreibung des aktuellen Kanals vor dem Server-Tab und stellt Fett, Kursiv, Unterstrichen, Durchgestrichen, Farben und Links aus TeamSpeak dar; gewöhnliche Klammertexte bleiben unverändert, und ohne Beschreibung erscheint ein Hinweis. Die Beschreibung wird bedarfsweise über `channelinfo` geladen, sodass Server ohne Kanal-Listen-Berechtigung weiter funktionieren.
+- Neuer Tab „Kanalbeschreibung“: Er steht als Standardansicht am Anfang der Tab-Leiste und zeigt die Beschreibung des aktuellen Kanals direkt beim Betreten; dargestellt werden Fett, Kursiv, Unterstrichen, Durchgestrichen, Farben und Links aus TeamSpeak, gewöhnliche Klammertexte bleiben unverändert, und ohne Beschreibung erscheint ein Hinweis. Die Beschreibung wird bedarfsweise über `channelinfo` geladen, sodass Server ohne Kanal-Listen-Berechtigung weiter funktionieren.
 
 ### Русский
 
-- Добавлен раздел «Описание канала»: на странице канала описание текущего канала показывается перед разделом «Сервер», с поддержкой полужирного, курсива, подчёркивания, зачёркивания, цвета и ссылок TeamSpeak, при этом обычный текст в квадратных скобках не изменяется; если описания нет, выводится подсказка. Описание запрашивается по требованию через `channelinfo`, поэтому серверы без права на список каналов продолжают работать.
+- Добавлен раздел «Описание канала»: он открывается по умолчанию и стоит первым в панели разделов, показывая описание текущего канала сразу при входе; поддерживаются полужирный, курсив, подчёркивание, зачёркивание, цвет и ссылки TeamSpeak, при этом обычный текст в квадратных скобках не изменяется; если описания нет, выводится подсказка. Описание запрашивается по требованию через `channelinfo`, поэтому серверы без права на список каналов продолжают работать.
 
 ### 日本語
 
-- 「チャンネル説明」タブを追加：チャンネルページで「サーバー」タブの前に現在のチャンネルの説明を表示し、TeamSpeak の太字・斜体・下線・取り消し線・色・リンクを描画します（本文中の通常の角括弧はそのまま）。説明がない場合は案内の空状態を表示。説明は `channelinfo` で必要なときだけ取得するため、チャンネル一覧の権限がないサーバーでも動作します。
+- 「チャンネル説明」タブを追加：タブ列の先頭に既定の表示として配置し、入室時に現在のチャンネルの説明を表示します。TeamSpeak の太字・斜体・下線・取り消し線・色・リンクを描画し、本文中の通常の角括弧はそのまま。説明がない場合は案内の空状態を表示。説明は `channelinfo` で必要なときだけ取得するため、チャンネル一覧の権限がないサーバーでも動作します。
 
 ## [0.2.4] — 2026-09-22
 
