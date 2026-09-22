@@ -64,6 +64,8 @@ async function main() {
     voiceBridgeOptions: {
       joinTickets,
       webRtc: () => adminService.getWebRtcAudioOptions(),
+      // 屏幕共享的 ICE 服务器不单独配置：voice-bridge 会复用语音 WebRTC 的
+      // 那一套（WEBSPEAK_STUN_URLS / WEBSPEAK_TURN_*），自建 STUN 只需配一处。
       // The public gateway only uses the relay configuration explicitly
       // saved in the admin console. Environment variables belong to the
       // standalone relay process and must never make the relay option appear
@@ -73,6 +75,7 @@ async function main() {
     },
     adminService,
     logger,
+    nextVisitorNumber: () => database.nextVisitorNumber(),
   });
 
   await webServer.start();

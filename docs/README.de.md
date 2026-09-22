@@ -15,6 +15,7 @@ Die öffentliche Demo läuft in Hongkong. Netzwerkbedingungen und Auslastung kö
 | Funktion | Beschreibung |
 | --- | --- |
 | TeamSpeak-Kompatibilität | Unterstützt TeamSpeak 3 und TeamSpeak 6 und erkennt das Zielprotokoll automatisch. |
+| Plattformübergreifendes P2P-Bildschirmteilen | Browsernutzer und native TeamSpeak-6-Clients können die Bildschirmfreigabe gegenseitig starten und ansehen; WebRTC/ICE überträgt Medien direkt, WebSpeak leitet nur die Signalisierung weiter. |
 | IPv6-Ziele | IPv6-TeamSpeak-Ziele und über DNS aufgelöste IPv6-Adressen werden standardmäßig unterstützt. |
 | Kanäle und Mitglieder | Kanalstruktur und aktuelle Mitglieder anzeigen und Kanäle wechseln. |
 | Echtzeit-Sprache | Opus-Audio mit kompatiblem Transport und optional integriertem WebRTC für geringere Latenz. |
@@ -61,6 +62,16 @@ WebRTC verwendet für Browser-Sprache einen Echtzeit-Medienpfad und ermöglicht 
 4. **WebRTC** aktivieren und speichern. Nicht unterstützte Browser oder Netzwerke wechseln automatisch zum kompatiblen Transport.
 
 Der Portbereich ist bei aktiviertem WebRTC gesperrt. Zum Ändern WebRTC zuerst deaktivieren und speichern, danach die Firewall-Regeln anpassen. Für öffentliche Bereitstellungen ist HTTPS erforderlich.
+
+### ICE-Kandidaten für Bildschirmfreigabe
+
+Die Medien der Bildschirmfreigabe versuchen weiterhin eine direkte Browser-zu-Browser-Verbindung; WebSpeak leitet nur die Signalisierung weiter. Die Bildschirmfreigabe nutzt dieselbe ICE-Konfiguration wie die Sprach-WebRTC-Verbindung (eigenes STUN sowie optional ein externer TURN-Dienst); dafür ist nichts zusätzlich zu konfigurieren. STUN überträgt keine Medien.
+
+Mit TURN kann die Medienübertragung diesen externen Dienst verwenden, aber niemals das WebSpeak-Gateway. Ohne TURN werden nur direkte ICE-Pfade und STUN verwendet.
+
+### Plattformübergreifendes P2P-Bildschirmteilen
+
+Browsernutzer und native TeamSpeak-6-Clients können Bildschirmfreigaben gegenseitig erkennen, starten und ansehen. Zwischen Browsern sowie zwischen Browser und nativem Client werden die Bildschirmmedien möglichst über eine direkte WebRTC/ICE-Peer-to-Peer-Verbindung übertragen; WebSpeak übernimmt Sitzungsberechtigung, Freigabestatus und SDP-/ICE-Signalisierung, transportiert aber keine Bildschirmmedien. Die Oberfläche zeigt Live-Status und Zuschauerzahl und bietet Lautstärke-, Vollbild- und Beenden-Steuerung. Für die Aufnahme stehen bis zu 1080p und 60 FPS sowie WebRTC-Statistiken zur Verfügung.
 
 ### 2. Relay-Modus
 
@@ -138,6 +149,7 @@ Relay deaktivieren und speichern, um die Option von der Willkommensseite zu entf
 
 | Version | Datum | Zusammenfassung |
 | --- | --- | --- |
+| [v0.2.4](https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak/releases/tag/v0.2.4) | 2026-09-22 | Plattformübergreifendes P2P-Bildschirmteilen zwischen Browsern und nativen TeamSpeak-6-Clients ergänzt; STUN-/externes-TURN-Konfiguration, Live-Player und Zuschauerstatus, Aufnahmeoptionen bis 1080p/60 FPS und WebRTC-Statistiken hinzugefügt; Bildschirmfreigabe-Interaktion verbessert und Besucherzählung ergänzt. |
 | [v0.2.3](https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak/releases/tag/v0.2.3) | 2026-09-19 | Mitgliederplanung und direkte Verschiebung nach Berechtigung ergänzt; Avatar-, Stummschaltstatus- und Identitätsunterstützung hinzugefügt; Screenshots und Dokumentation für alle fünf Sprachen aktualisiert. |
 | [v0.2.2](https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak/releases/tag/v0.2.2) | 2026-09-17 | Browserseitige Mikrofon-Geräuschunterdrückung, russische und japanische Oberfläche sowie sprachabhängige Begrüßungstexte ergänzt; Lautstärkeinteraktion und Fehlertexte/-codes auf Basis von PR #2 verbessert. |
 | [v0.2.1](https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak/releases/tag/v0.2.1) | 2026-09-13 | Verbindungsfehler auf der Willkommensseite verbessert, Fehlercodes erhalten und sicher gekürzt sowie IPv6-Ziele standardmäßig unterstützt. |
