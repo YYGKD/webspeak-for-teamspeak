@@ -54,6 +54,13 @@ export type TSRawNotification = RawNotification;
 
 export type TSChatScope = "channel" | "server" | "private";
 
+/** 单个频道的详情，重点是「频道说明」。 */
+export interface TSChannelInfo {
+  name: string;
+  topic: string;
+  description: string;
+}
+
 export interface TSChatMessage {
   invokerName: string;
   invokerId: number;
@@ -368,6 +375,39 @@ export class TSClient extends EventEmitter {
   async execCommandWithResponse(command: string, timeoutMs = 3000): Promise<Record<string, string>[]> {
     if (!this.client || !this.connected) throw new Error("TeamSpeak session is not ready");
     return this.client.execCommandWithResponse(command, timeoutMs);
+  }
+
+  /**
+   * 读取单个频道的详情，重点是「频道说明」（channel_description）。
+   *
+   * 说明字段只有这一条路可取（实测于 TS6 服务器）：
+   * - 欢迎序列推送的 channellist 行不含 channel_description，只有恒为空串的 channel_topic；
+   * - SDK 的 listChannels() 把 description 写死为空串，而 channellist 在普通客户端权限下又被拒；
+   * - channelinfo cid=N 普通客户端即可调用（实测 18ms 返回全文），所以单独走它。
+   *
+   * SDK 的命令解析已完成一次反转义（返回值里是真实换行与空格），这里不再二次处理。
+   */
+  async getChannelInfo(channelId: bigint): Promise<TSChannelInfo> {
+    if (!this.client || !this.connected) throw new Error("TeamSpeak session is not ready");
+    try {
+      const rows = await this.execCommandWithResponse(`channelinfo cid=${channelId}`, 5_000);
+      const row = rows[0];
+      if (!row) throw new Error(`no data returned for channel ${channelId}`);
+      return {
+        name: row.channel_name ?? "",
+        topic: row.channel_topic ?? "",
+        description: row.channel_description ?? "",
+      };
+    } catch (error: unknown) {
+      // 权限、服务器差异、超时都会落到这里。说明属于可选信息：失败只留痕，
+      // 由调用方回一个"不可用"给浏览器，界面回落空态，绝不影响会话本身。
+      this.logger.warn({
+        failureCode: "CHANNEL_INFO_UNAVAILABLE",
+        failureDetail: error instanceof Error ? error.message : String(error),
+        channelId: channelId.toString(),
+      }, "TeamSpeak channel info unavailable");
+      throw error;
+    }
   }
 
   /**

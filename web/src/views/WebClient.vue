@@ -203,15 +203,21 @@
             <section :class="['chat-panel', { 'mobile-section-hidden': mobileSection !== 'chat' }]">
               <div class="chat-tabs" role="tablist" :aria-label="t('chatTabs')">
                 <button type="button" :class="{ active: chatTab === 'channel' }" @click="chatTab = 'channel'"><Icon name="hash" :size="15" /> {{ currentChannelName }}</button>
+                <button type="button" :class="{ active: chatTab === 'description' }" @click="chatTab = 'description'"><Icon name="info" :size="15" /> {{ t('channelDescription') }}</button>
                 <button type="button" :class="{ active: chatTab === 'server' }" @click="chatTab = 'server'"><Icon name="server" :size="15" /> {{ t('serverChat') }}</button>
                 <button v-for="conversation in privateConversations" :key="conversation.id" type="button" :class="{ active: chatTab === 'private' && privateClientId === conversation.id }" @click="openPrivateChat(conversation.id)"><Icon name="message" :size="15" /> {{ conversation.name }}</button>
                 <button type="button" :class="{ active: chatTab === 'events' }" @click="chatTab = 'events'"><Icon name="bell" :size="15" /> {{ t('eventLog') }}</button>
               </div>
-              <div class="section-heading chat-heading"><div><span class="section-kicker">{{ chatTabLabel }}</span><h2><Icon :name="chatTab === 'server' ? 'server' : chatTab === 'events' ? 'bell' : chatTab === 'private' ? 'message' : 'hash'" :size="20" /> {{ chatTitle }}</h2></div><span class="section-counter">{{ chatTab === 'events' ? t('eventCount', { count: serverEvents.length }) : t('messageCount', { count: visibleChatMessages.length }) }}</span></div>
+              <div class="section-heading chat-heading"><div><span class="section-kicker">{{ chatTabLabel }}</span><h2><Icon :name="chatTab === 'server' ? 'server' : chatTab === 'events' ? 'bell' : chatTab === 'description' ? 'info' : chatTab === 'private' ? 'message' : 'hash'" :size="20" /> {{ chatTitle }}</h2></div><span v-if="chatTab !== 'description'" class="section-counter">{{ chatTab === 'events' ? t('eventCount', { count: serverEvents.length }) : t('messageCount', { count: visibleChatMessages.length }) }}</span></div>
               <div ref="chatListEl" class="message-list">
                 <div v-if="chatTab === 'events'">
                   <article v-for="event in serverEvents" :key="event.id" class="event-row"><time>{{ formatTime(event.timestamp) }}</time><span>{{ event.message }}</span></article>
                   <div v-if="!serverEvents.length" class="chat-empty"><div class="chat-empty-icon"><Icon name="bell" :size="24" /></div><strong>{{ t('noEvents') }}</strong><span>{{ t('noEventsLead') }}</span></div>
+                </div>
+                <div v-else-if="chatTab === 'description'">
+                  <!-- 说明是 BBCode 富文本：渲染前已由 teamspeak-bbcode.ts 转义并只保留白名单标签。 -->
+                  <div v-if="channelDescriptionHtml" class="channel-description" v-html="channelDescriptionHtml"></div>
+                  <div v-else class="chat-empty"><div class="chat-empty-icon"><Icon name="info" :size="24" /></div><strong>{{ t('noChannelDescription') }}</strong><span>{{ t('noChannelDescriptionLead') }}</span></div>
                 </div>
                 <div v-else-if="!visibleChatMessages.length" class="chat-empty"><div class="chat-empty-icon"><Icon name="message" :size="24" /></div><strong>{{ chatTab === 'private' ? t('privateChatStart') : t('chatStart') }}</strong><span>{{ chatTab === 'private' ? t('privateChatStartLead') : t('chatStartLead') }}</span></div>
                 <template v-for="message in visibleChatMessages" :key="message.id">
@@ -221,7 +227,7 @@
                   </article>
                 </template>
               </div>
-               <form v-if="chatTab !== 'events'" class="message-composer" @submit.prevent="submitMessage">
+               <form v-if="chatTab !== 'events' && chatTab !== 'description'" class="message-composer" @submit.prevent="submitMessage">
                  <input v-model="messageDraft" maxlength="500" :placeholder="chatPlaceholder" :aria-label="t('send')" />
                  <button class="send-button" type="submit" :disabled="!messageDraft.trim()" :title="t('send')"><Icon name="send" :size="18" /></button>
                </form>
@@ -246,7 +252,7 @@
                 <div :class="['member-avatar', { speaking: isSpeaking(member) }]" :style="avatarStyle(member.nickname, member.isSelf, member.avatar)">{{ member.avatar ? '' : avatarInitial(member.nickname) }}<span class="member-presence"></span></div>
                 <div class="member-copy"><strong>{{ memberDisplayName(member) }}</strong><span>{{ member.away ? t('away') : isSpeaking(member) ? t('speaking') : member.isSelf ? t('yourDevice') : t('memberOnline') }}</span></div>
                 <div class="member-flags" :aria-label="t('memberStates')"><span v-if="member.away" :title="t('away')" :aria-label="t('away')"><Icon name="clock" :size="13" /></span><span v-if="member.inputMuted" :title="t('inputMuted')" :aria-label="t('inputMuted')"><Icon name="mic-off" :size="13" /></span><span v-if="member.outputMuted" :title="t('outputMuted')" :aria-label="t('outputMuted')"><Icon name="volume-off" :size="13" /></span><span v-if="member.channelCommander" :title="t('channelCommander')" :aria-label="t('channelCommander')"><Icon name="shield" :size="13" /></span></div>
-                <div v-if="!member.isSelf" class="member-volume" @pointerdown="suppressMemberDragFromVolume" @pointerup="clearMemberDragSuppression" @pointercancel="clearMemberDragSuppression"><Icon :name="(volumes[member.id] ?? 1) === 0 ? 'volume-off' : 'volume'" :size="14" /><input type="range" min="0" max="400" :value="(volumes[member.id] ?? 1) * 100" :style="rangeStyle((volumes[member.id] ?? 1) / 4, 1)" :aria-label="t('memberVolume')" @input="onVolInput(member.id, $event)" /></div>
+                <div v-if="!member.isSelf" class="member-volume" @pointerdown="suppressMemberDragFromVolume" @pointerup="clearMemberDragSuppression" @pointercancel="clearMemberDragSuppression"><Icon :name="(volumes[member.id] ?? DEFAULT_MEMBER_VOLUME) === 0 ? 'volume-off' : 'volume'" :size="14" /><input type="range" min="0" max="400" :value="(volumes[member.id] ?? DEFAULT_MEMBER_VOLUME) * 100" :style="rangeStyle((volumes[member.id] ?? DEFAULT_MEMBER_VOLUME) / 4, 1)" :aria-label="t('memberVolume')" @input="onVolInput(member.id, $event)" /></div>
                 <button v-if="isMobileViewport && !member.isSelf" type="button" class="member-action-button" :aria-label="t('moreMemberOptions')" @click.stop="openMemberActions(member)"><Icon name="more" :size="18" /></button>
               </div>
             </div>
@@ -300,7 +306,7 @@
     <div v-if="memberMenu && isMobileViewport" class="member-menu-backdrop" @click="memberMenu = null"></div>
     <div v-if="memberMenu" ref="memberMenuEl" class="member-context-menu" :style="memberMenuStyle" @click.stop>
       <div class="member-menu-header"><strong>{{ memberMenu.member.nickname }}</strong><button type="button" class="member-menu-close" :aria-label="t('close')" @click="memberMenu = null"><Icon name="close" :size="17" /></button></div>
-      <label class="menu-volume"><span>{{ t('memberVolume') }}</span><input type="range" min="0" max="400" :value="(volumes[memberMenu.member.id] ?? 1) * 100" :style="rangeStyle((volumes[memberMenu.member.id] ?? 1) / 4, 1)" :aria-label="t('memberVolume')" @input="onVolInput(memberMenu.member.id, $event)" /></label>
+      <label class="menu-volume"><span>{{ t('memberVolume') }}</span><input type="range" min="0" max="400" :value="(volumes[memberMenu.member.id] ?? DEFAULT_MEMBER_VOLUME) * 100" :style="rangeStyle((volumes[memberMenu.member.id] ?? DEFAULT_MEMBER_VOLUME) / 4, 1)" :aria-label="t('memberVolume')" @input="onVolInput(memberMenu.member.id, $event)" /></label>
       <button type="button" @click="openPrivateChat(memberMenu.member.id); memberMenu = null"><Icon name="message" :size="15" /> {{ t('privateMessage') }}</button>
       <button type="button" @click="pokeMember(memberMenu.member); memberMenu = null"><Icon name="bell" :size="15" /> {{ t('poke') }}</button>
       <button type="button" @click="toggleWhisperTarget(memberMenu.member); memberMenu = null"><Icon name="mic" :size="15" /> {{ whisperTargetIds.has(memberMenu.member.id) ? t('removeWhisperTarget') : t('setWhisperTarget') }}</button>
@@ -366,10 +372,11 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import Icon from "../components/Icon.vue";
 import LanguageSwitcher from "../components/LanguageSwitcher.vue";
-import { useVoiceWebSocket, setWebRtcIceServers, type ChannelInfo, type ChannelMember, type ChatMessage, type LatencyProbeResult, type MediaPathStats, type ScreenShareCaptureSettings, type ScreenShareStream } from "../composables/useVoiceWebSocket.js";
+import { DEFAULT_MEMBER_VOLUME, useVoiceWebSocket, setWebRtcIceServers, type ChannelInfo, type ChannelMember, type ChatMessage, type LatencyProbeResult, type MediaPathStats, type ScreenShareCaptureSettings, type ScreenShareStream } from "../composables/useVoiceWebSocket.js";
 import { clearLocalData as clearStoredLocalData, isLocalPersistenceAvailable, listFavorites, listRecentServers, loadLocalPreferences, loadStoredIdentity, recordRecentServer, removeFavorite, removeStoredIdentity, saveFavorite, saveLocalPreferences, saveStoredIdentity, type FavoriteServer, type RecentServer } from "../services/local-persistence.js";
 import { applyTheme, getStoredTheme, isDarkTheme, nextTheme, saveTheme, type ThemeMode } from "../services/theme.js";
 import { applyDocumentLanguage } from "../services/document-language.js";
+import { renderChannelDescription } from "../services/teamspeak-bbcode.js";
 import { combineTeamSpeakTarget, DEFAULT_TEAM_SPEAK_PORT, isValidTeamSpeakPort, splitTeamSpeakTarget } from "../services/teamspeak-target.js";
 
 interface TreeChannel extends ChannelInfo {
@@ -456,6 +463,9 @@ const {
   measureLatency,
   sampleMediaPath,
   webrtcActive,
+  readRestorableSession,
+  channelInfos,
+  requestChannelInfo,
 } = useVoiceWebSocket();
 
 const query = new URLSearchParams(location.search);
@@ -514,7 +524,7 @@ function setScreenVideoElement(element: unknown): void {
 }
 const localPersistenceAvailable = isLocalPersistenceAvailable();
 const identityReady = ref(!localPersistenceAvailable);
-const chatTab = ref<"channel" | "server" | "private" | "events">("channel");
+const chatTab = ref<"channel" | "description" | "server" | "private" | "events">("channel");
 const privateClientId = ref(0);
 const away = ref(false);
 const awayMessage = ref("");
@@ -757,6 +767,9 @@ const translations: Record<string, Record<string, string>> = {
     eventCount: "{{count}} 条事件",
     noEvents: "暂无服务器事件",
     noEventsLead: "频道和成员变化会显示在这里。",
+    channelDescription: "频道说明",
+    noChannelDescription: "暂无频道说明",
+    noChannelDescriptionLead: "管理员在 TeamSpeak 客户端为频道填写说明后，会显示在这里。",
     available: "在线",
     away: "离开",
     awayPrompt: "离开状态说明（可选）",
@@ -1092,6 +1105,9 @@ const translations: Record<string, Record<string, string>> = {
     eventCount: "{{count}} events",
     noEvents: "No server events yet",
     noEventsLead: "Channel and member changes will appear here.",
+    channelDescription: "Channel description",
+    noChannelDescription: "No channel description yet",
+    noChannelDescriptionLead: "A channel description set in the TeamSpeak client will appear here.",
     available: "Available",
     away: "Away",
     awayPrompt: "Away message (optional)",
@@ -1421,6 +1437,9 @@ translations.de = {
   eventCount: "{{count}} Ereignisse",
   noEvents: "Noch keine Serverereignisse",
   noEventsLead: "Änderungen an Kanälen und Mitgliedern werden hier angezeigt.",
+  channelDescription: "Kanalbeschreibung",
+  noChannelDescription: "Noch keine Kanalbeschreibung",
+  noChannelDescriptionLead: "Eine im TeamSpeak-Client gesetzte Kanalbeschreibung erscheint hier.",
   available: "Verfügbar",
   away: "Abwesend",
   awayPrompt: "Abwesenheitsnachricht (optional)",
@@ -2310,9 +2329,24 @@ const visibleChatMessages = computed(() => {
   return chatMessages.filter((message) => message.scope === "channel" && (!message.targetId || message.targetId === "0" || !channelId || message.targetId === channelId));
 });
 
-const chatTabLabel = computed(() => chatTab.value === "channel" ? t("textChannel") : chatTab.value === "server" ? t("serverChat") : chatTab.value === "private" ? t("privateMessage") : t("eventLog"));
-const chatTitle = computed(() => chatTab.value === "channel" ? t("channelChat", { channel: currentChannelName.value }) : chatTab.value === "server" ? t("serverChat") : chatTab.value === "events" ? t("eventLog") : privateConversations.value.find((conversation) => conversation.id === privateClientId.value)?.name ?? t("privateMessage"));
+const chatTabLabel = computed(() => chatTab.value === "channel" ? t("textChannel") : chatTab.value === "description" ? t("channelDescription") : chatTab.value === "server" ? t("serverChat") : chatTab.value === "private" ? t("privateMessage") : t("eventLog"));
+const chatTitle = computed(() => chatTab.value === "channel" ? t("channelChat", { channel: currentChannelName.value }) : chatTab.value === "description" ? t("channelDescription") : chatTab.value === "server" ? t("serverChat") : chatTab.value === "events" ? t("eventLog") : privateConversations.value.find((conversation) => conversation.id === privateClientId.value)?.name ?? t("privateMessage"));
 const chatPlaceholder = computed(() => chatTab.value === "private" ? t("privateMessagePlaceholder") : chatTab.value === "server" ? t("serverMessagePlaceholder") : t("sendMessagePlaceholder"));
+
+/**
+ * 「频道说明」标签的内容。
+ *
+ * 说明不在 channelList 里（欢迎序列不带该字段、SDK 的 listChannels 又把它写死成空串，
+ * 见 src/server/ts-client.ts 的 getChannelInfo），所以这里按当前频道按需请求：
+ * 打开标签或频道变化时拉一次，网关侧按 cid 缓存；取不到就回落空态文案。
+ */
+const descriptionChannelId = computed(() => (currentChannel.value?.id ? String(currentChannel.value.id) : ""));
+const channelDescriptionHtml = computed(() => renderChannelDescription(channelInfos[descriptionChannelId.value]?.description ?? ""));
+
+watch([chatTab, descriptionChannelId], ([tab, channelId]) => {
+  if (tab !== "description" || !channelId) return;
+  void requestChannelInfo(channelId);
+}, { immediate: true });
 const visiblePokes = computed(() => pokeNotifications.slice(-3));
 const memberMenuStyle = computed(() => {
   const current = memberMenu.value;
@@ -2528,6 +2562,7 @@ let fullscreenChangeHandler: (() => void) | undefined;
 
 onMounted(() => {
   browserError.value = checkSupport() ?? "";
+  window.addEventListener("beforeunload", handleBeforeUnload);
   void loadPublicConfig();
   void loadLocalPreferences().then((preferences) => {
     if (!localStorage.getItem("webspeak:language") && (preferences.language === "zh" || preferences.language === "en" || preferences.language === "de" || preferences.language === "ru" || preferences.language === "ja")) language.value = preferences.language;
@@ -2562,11 +2597,25 @@ onMounted(() => {
 onUnmounted(() => {
   stopPerformanceMonitoring();
   disconnect();
+  window.removeEventListener("beforeunload", handleBeforeUnload);
   if (deviceChangeHandler) navigator.mediaDevices?.removeEventListener("devicechange", deviceChangeHandler);
   if (viewportMediaQuery && viewportChangeHandler) viewportMediaQuery.removeEventListener?.("change", viewportChangeHandler);
   if (fullscreenChangeHandler) document.removeEventListener("fullscreenchange", fullscreenChangeHandler);
   if (toastTimer) clearTimeout(toastTimer);
 });
+
+/**
+ * 语音中离开页面前的确认。
+ *
+ * 刷新现在会自动回到房间（见上面的恢复逻辑），所以这个提示主要覆盖「关标签页」
+ * 这种真的会结束会话的操作。浏览器不允许自定义文案，只能触发它自带的确认框。
+ */
+function handleBeforeUnload(event: BeforeUnloadEvent): void {
+  if (!voiceState.connected) return;
+  event.preventDefault();
+  // 规范要求设置 returnValue 才会弹框；现代浏览器忽略具体文案。
+  event.returnValue = "";
+}
 
 function doConnect() {
   if (!canJoin.value || voiceState.connecting) return;
@@ -2659,6 +2708,54 @@ const canJoin = computed(() => Boolean(
   && (accessMode.value === "fixed" || (serverHost.value.trim() && isValidTeamSpeakPort(serverPort.value))),
 ));
 const isFavorite = computed(() => favoriteServers.value.some((favorite) => favorite.id === serverKey(currentServerTarget())));
+
+// ── 刷新后自动回到房间 ───────────────────────────────────────────────────────
+// 会话记录存在 sessionStorage 里（刷新保留、关标签页清除），见 useVoiceWebSocket。
+// 这里读一次：先把表单预填成上次的房间，等公共配置就绪（canJoin 变 true）再自动进去。
+//
+// URL 里带着明确的加入意图时（邀请链接、分享链接指定的目标）不自动恢复 —— 那些
+// 参数是用户当下的选择，优先级高于「上次的房间」。
+const urlSpecifiesTarget = Boolean(inviteToken || query.get("server") || query.get("tsHost") || query.get("target"));
+const restorableSession = urlSpecifiesTarget ? null : readRestorableSession();
+/** 刷新恢复最多试两次：首次 + 1 次针对身份占用竞态的重试。 */
+const RESTORE_MAX_ATTEMPTS = 2;
+const RESTORE_IDENTITY_RETRY_MS = 1_500;
+let restorePending = restorableSession !== null;
+let restoreAttempts = 0;
+
+if (restorableSession) {
+  const restoredTarget = splitTeamSpeakTarget(restorableSession.target);
+  serverHost.value = restoredTarget.address;
+  serverPort.value = restoredTarget.port;
+  channel.value = restorableSession.channel;
+  nickname.value = restorableSession.nickname;
+  serverPassword.value = restorableSession.serverPassword;
+  rememberIdentity.value = restorableSession.rememberIdentity;
+  accelerationRelayId.value = restorableSession.accelerationRelayId;
+  if (restorableSession.rememberIdentity && restorableSession.identity) identityMaterial.value = restorableSession.identity;
+}
+
+watch(canJoin, (ready) => {
+  if (!ready || !restorePending) return;
+  restorePending = false;
+  restoreAttempts = 1;
+  doConnect();
+}, { immediate: true });
+
+/**
+ * 刷新恢复唯一真正的竞态：刷新会立刻关掉旧 WebSocket，而服务端拆会话
+ * （断开 TeamSpeak 客户端 → 释放身份租约）是异步的。新连接可能抢在租约释放之前
+ * 到达，于是拿到 IDENTITY_IN_USE。等一拍重试一次就够，不值得为它动服务端。
+ */
+watch(() => voiceState.errorCode, (code) => {
+  if (voiceState.connected) { restoreAttempts = 0; return; }
+  if (code !== "IDENTITY_IN_USE" || restoreAttempts === 0 || restoreAttempts >= RESTORE_MAX_ATTEMPTS) return;
+  restoreAttempts += 1;
+  window.setTimeout(() => {
+    if (!voiceState.connected && !voiceState.connecting) doConnect();
+  }, RESTORE_IDENTITY_RETRY_MS);
+});
+
 
 function currentServerTarget(): string {
   return combineTeamSpeakTarget(serverHost.value, serverPort.value);
@@ -3560,6 +3657,7 @@ function stopWhisperTalk(): void {
 .app-shell .message-meta strong { font-size: 13.75px; }
 .app-shell .message-meta time { font-size: 11.25px; }
 .app-shell .message-bubble, .app-shell .message-composer input { font-size: 15px; }
+.app-shell .channel-description { font-size: 15px; }
 .app-shell .dock-user strong { font-size: 13.75px; }
 .app-shell .dock-user span, .app-shell .mic-mode-switch button, .app-shell .ptt-indicator { font-size: 11.25px; }
 .app-shell .member-panel-heading h2 { font-size: 23.75px; }
@@ -3598,7 +3696,7 @@ function stopWhisperTalk(): void {
 
 @media (min-width: 741px) and (max-width: 980px) { .app-shell { grid-template-columns: minmax(0, 1fr); }.member-panel { display: none; } }
 @media (max-width: 980px) { .app-shell { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(210px, 35dvh); }.workspace { height: auto; min-height: 0; }.member-panel { display: flex; border-top: 1px solid #eef2f0; border-left: 0; padding: 16px 18px; }.member-tree { margin-top: 10px; } }
-@media (max-width: 740px) { .app-shell { display: grid; grid-template-rows: minmax(0, 1fr) 220px; }.app-shell .room-hero h1 { font-size: 27.5px; }.app-shell .room-hero p { font-size: 13.75px; }.app-shell .section-heading h2 { font-size: 21.25px; }.app-shell .message-bubble, .app-shell .message-composer input { font-size: 13.75px; }.app-shell .mic-mode-switch button { font-size: 11.25px; }.settings-modal .settings-content { padding: 24px 20px; }.settings-modal .settings-header h2 { font-size: 23.75px; } }
+@media (max-width: 740px) { .app-shell { display: grid; grid-template-rows: minmax(0, 1fr) 220px; }.app-shell .room-hero h1 { font-size: 27.5px; }.app-shell .room-hero p { font-size: 13.75px; }.app-shell .section-heading h2 { font-size: 21.25px; }.app-shell .message-bubble, .app-shell .message-composer input { font-size: 13.75px; }.app-shell .channel-description { font-size: 13.75px; }.app-shell .mic-mode-switch button { font-size: 11.25px; }.settings-modal .settings-content { padding: 24px 20px; }.settings-modal .settings-header h2 { font-size: 23.75px; } }
 
 /* Keep the connected workspace sized to the browser viewport and let the
    workspace and member tree own their scroll areas when the window shrinks. */
@@ -3664,6 +3762,9 @@ function stopWhisperTalk(): void {
 .chat-tabs button.active { color: #006a64; background: #dff1ed; border-color: #c9e5df; font-weight: 700; }
 .event-row { display: flex; align-items: baseline; gap: 12px; padding: 9px 10px; color: #65746e; border-bottom: 1px solid #edf2f0; font-size: 12px; line-height: 1.45; }
 .event-row time { flex: 0 0 auto; color: #99a6a1; font-size: 10px; }
+/* 频道说明：保留说明里的换行与空行，长串（如歌单地址）在容器内换行而不是撑破布局。 */
+.channel-description { padding: 12px 10px 6px 3px; color: #43534e; font-size: 12px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+.channel-description a { color: #006a64; }
 .member-panel-heading { align-items: flex-end; }
 .status-button { display: inline-flex; align-items: center; gap: 6px; padding: 6px 8px; color: #5f746c; background: #f2f7f5; border: 1px solid #e0ebe7; border-radius: 7px; font-size: 11px; cursor: pointer; }
 .status-button:hover, .status-button.active { color: #8c653a; background: #fcf3e7; border-color: #f0dcc0; }

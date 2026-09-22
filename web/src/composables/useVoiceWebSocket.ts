@@ -233,6 +233,18 @@ export interface ChannelInfo {
   members?: { id: number; nickname: string; uid?: string; avatar?: string; away?: boolean; awayMessage?: string; inputMuted?: boolean; outputMuted?: boolean; channelCommander?: boolean }[];
 }
 
+/**
+ * 单个频道的详情（按需向网关请求 `channelinfo cid=N`）。
+ * 说明字段不在 channelList 里：欢迎序列不带它、SDK 的 listChannels 又把它写死成空串，
+ * 所以只有这一条路可取，见 src/server/ts-client.ts 的 getChannelInfo。
+ */
+export interface ChannelInfoDetails {
+  id: string;
+  name: string;
+  topic: string;
+  description: string;
+}
+
 export interface ChatMessage {
   id: string;
   scope: "channel" | "server" | "private" | "system";
@@ -337,6 +349,18 @@ const NICKNAME_LENGTH_MESSAGE = "昵称长度不符合 TeamSpeak 服务器要求
  * 网关只能等到自己的内部超时才报错，用户拿到的是「连接超时，请检查网络」——
  * 被带偏到网络上排查，而真实原因只是昵称短了一个字。
  */
+/**
+ * 成员音量滑块的默认值（0..4，即 0%..400%）。
+ *
+ * 200% 而不是 100%：TeamSpeak 侧的语音通常偏轻，默认给一档增益，用户不用每进一个
+ * 房间都手动拉。上限仍然是 400%，单个人可以再往上调。注意这是**增益**，遇到本来
+ * 就录得很响的人会削波 —— 那种情况用户会自己往下拉。
+ *
+ * 所有读取成员音量的地方都必须用这个常量，否则会出现「滑块显示 200%、实际播放按
+ * 100%」这种默认值漂移。
+ */
+export const DEFAULT_MEMBER_VOLUME = 2;
+
 const MIN_NICKNAME_CHARACTERS = 3;
 
 /** 连接阶段「正在连接…」的兜底上限。见 armConnectWatchdog。 */
@@ -454,6 +478,73 @@ const CONNECTION_FAILURE_MESSAGES: Record<string, string> = {
   GATEWAY_HEARTBEAT_LOST: "与语音网关的连接已失去响应，请重新进入语音空间",
 };
 
+/**
+ * 刷新后自动回到房间用的会话记录。
+ *
+ * 放在 **sessionStorage**（不是 localStorage）是有意的：sessionStorage 按标签页隔离
+ * 且刷新保留、关标签页清除。所以「刷新」会拿到记录 → 自动重连；「新开一个标签页」
+ * 拿不到记录 → 走正常的加入流程，不会去抢同一个 TS 身份。
+ *
+ * 记录只在**显式离开**或**服务端明确判死**时清除（见 clearActiveSession 的调用点），
+ * 所以刷新时它还在 —— 这正是恢复的依据。
+ */
+interface ActiveSessionRecord {
+  target: string;
+  channel: string;
+  nickname: string;
+  serverPassword: string;
+  identity?: string;
+  rememberIdentity: boolean;
+  accelerated: boolean;
+  accelerationRelayId: string;
+  /** 真正连上过才算「可恢复」：只发起过连接就刷新，不应该自动重连。 */
+  established: boolean;
+}
+
+const ACTIVE_SESSION_KEY = "webspeak:active-session";
+
+function writeActiveSession(record: ActiveSessionRecord): void {
+  try {
+    sessionStorage.setItem(ACTIVE_SESSION_KEY, JSON.stringify(record));
+  } catch {
+    // 隐私模式或配额满：刷新恢复不可用，但不该影响正常连接。
+  }
+}
+
+function clearActiveSession(): void {
+  try {
+    sessionStorage.removeItem(ACTIVE_SESSION_KEY);
+  } catch {
+    // 同上：清理失败不是错误。
+  }
+}
+
+function readActiveSession(): ActiveSessionRecord | null {
+  let parsed: unknown;
+  try {
+    const raw = sessionStorage.getItem(ACTIVE_SESSION_KEY);
+    if (!raw) return null;
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const record = parsed as Partial<ActiveSessionRecord>;
+  if (typeof record.target !== "string" || !record.target.trim()) return null;
+  if (typeof record.nickname !== "string" || !record.nickname.trim()) return null;
+  return {
+    target: record.target,
+    channel: typeof record.channel === "string" ? record.channel : "",
+    nickname: record.nickname,
+    serverPassword: typeof record.serverPassword === "string" ? record.serverPassword : "",
+    ...(typeof record.identity === "string" ? { identity: record.identity } : {}),
+    rememberIdentity: record.rememberIdentity === true,
+    accelerated: record.accelerated === true,
+    accelerationRelayId: typeof record.accelerationRelayId === "string" ? record.accelerationRelayId : "",
+    established: record.established === true,
+  };
+}
+
 export function useVoiceWebSocket() {
   const ws = ref<WebSocket | null>(null);
   const state = reactive<VoiceState>({ connected: false, connecting: false, reconnecting: false, reconnectAttempt: 0, reconnectFailed: false, tsClientId: 0, error: "", errorCode: "", microphoneError: "", microphoneErrorCode: "", audioNotice: "", audioNoticeCode: "", channelSwitchedChannelId: "" });
@@ -468,6 +559,11 @@ export function useVoiceWebSocket() {
   const pendingLatencyProbes = new Map<string, { startedAt: number; resolve: (result: LatencyProbeResult | null) => void; timer: ReturnType<typeof setTimeout> }>();
   let commandSequence = 0;
   const pendingCommands = new Map<string, { resolve: () => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+  let channelInfoSequence = 0;
+  const pendingChannelInfos = new Map<string, { resolve: (details: ChannelInfoDetails | null) => void; timer: ReturnType<typeof setTimeout> }>();
+  // 频道说明几乎不变（只有管理员改频道时才会动），按 cid 缓存，切回同一频道不再请求。
+  // 会话结束/重置时清空，避免把 A 服务器的 cid 说明显示到 B 服务器。
+  const channelInfos = reactive<Record<string, ChannelInfoDetails>>({});
   let webrtcPeer: RTCPeerConnection | null = null;
   // SFU：每个 slot 一个播放节点，slot 归属由服务端的 speakerMap 消息驱动。
   // 不再有"单个混音流"的概念 —— 说话人各自一路，浏览器侧做音量与活动检测。
@@ -668,7 +764,7 @@ export function useVoiceWebSocket() {
 
   function applyOutputVolume(): void {
     const level = effectiveOutputVolume();
-    for (const [clientId, gain] of remoteGains) gain.gain.value = (volumes[clientId] ?? 1) * level;
+    for (const [clientId, gain] of remoteGains) gain.gain.value = (volumes[clientId] ?? DEFAULT_MEMBER_VOLUME) * level;
     syncSfuVolumes();
   }
 
@@ -1390,7 +1486,7 @@ export function useVoiceWebSocket() {
   function syncSfuVolumes(): void {
     const level = effectiveOutputVolume();
     for (const node of sfuSlotNodes.values()) {
-      const memberVolume = node.clientId === null ? 1 : (volumes[node.clientId] ?? 1);
+      const memberVolume = node.clientId === null ? 1 : (volumes[node.clientId] ?? DEFAULT_MEMBER_VOLUME);
       node.gain.gain.value = Math.max(0, memberVolume * level);
     }
   }
@@ -1703,7 +1799,7 @@ export function useVoiceWebSocket() {
 
     if (!decoder) {
       const gainNode = ctx.createGain();
-      gainNode.gain.value = (volumes[clientId] ?? 1) * effectiveOutputVolume();
+      gainNode.gain.value = (volumes[clientId] ?? DEFAULT_MEMBER_VOLUME) * effectiveOutputVolume();
       gainNode.connect(ctx.destination);
       remoteGains.set(clientId, gainNode);
       const generation = ++nextRemoteDecoderGeneration;
@@ -1873,10 +1969,42 @@ export function useVoiceWebSocket() {
     }, RECONNECT_WATCHDOG_MS);
   }
 
+  /** 会话真正建立后才把记录标成「可恢复」。 */
+  function markActiveSessionEstablished(): void {
+    if (!lastConnection) return;
+    writeActiveSession({ ...lastConnection, established: true });
+  }
+
+  /**
+   * 把「我现在在哪个频道」回写给恢复记录。
+   *
+   * 记录里的 channel 是加入页当时填的频道名；进房间后点频道树切换，那个值就过期了
+   * —— 那样刷新会把人送回默认频道，而不是他真正待着的频道。频道树每次变化
+   * （自己切频道、别人进出都会触发 channelList）时按「自己所在频道」回写一次。
+   *
+   * 只认频道名不认 id：网关的 ensureChannel 就是按名字匹配的
+   * （voice-bridge.ts:442-455），保持同一口径，不必动服务端。
+   */
+  function refreshRestorableChannel(): void {
+    if (!lastConnection || !state.connected) return;
+    const selfId = state.tsClientId;
+    if (!selfId) return;
+    const own = channels.find((channel) => channel.members?.some((member) => member.id === selfId));
+    const name = own?.name?.trim();
+    if (!name || name === lastConnection.channel) return;
+    lastConnection = { ...lastConnection, channel: name };
+    markActiveSessionEstablished();
+  }
+
   function connect(target: string, channel: string, nickname: string, serverPassword = "", identity = "", rememberIdentity = false, inviteToken = "", accelerated = false, accelerationRelayId = ""): void {
     disconnect(true);
     lastConnection = { target, channel, nickname, serverPassword, ...(identity ? { identity } : {}), rememberIdentity, accelerated, accelerationRelayId };
     identityMaterial.value = identity;
+    // 记住这次会话，供刷新后自动回到房间。走邀请链接加入的不记：邀请可能是一次性的
+    // （maxUses=1），刷新后自动重连只会撞一句「邀请已失效」，不如让用户看到预填好的表单。
+    if (!inviteToken) {
+      writeActiveSession({ target, channel, nickname, serverPassword, ...(identity ? { identity } : {}), rememberIdentity, accelerated, accelerationRelayId, established: false });
+    }
     const sequence = ++connectionSequence;
     state.error = "";
     state.errorCode = "";
@@ -1970,6 +2098,7 @@ export function useVoiceWebSocket() {
       clearReconnectWatchdog();
       clearLatencyProbes();
       rejectPendingCommands(new Error("语音连接已关闭"));
+      resetChannelInfos();
       state.connected = false;
       state.connecting = false;
       state.reconnecting = false;
@@ -1987,6 +2116,8 @@ export function useVoiceWebSocket() {
         if (reasonCode) {
           state.errorCode = reasonCode;
           state.error = connectionFailureMessage(reasonCode);
+          // 管理员结束了这条会话：刷新不该再自动回到房间（会被再踢一次）。
+          if (reasonCode === "SESSION_TERMINATED_BY_ADMIN") clearActiveSession();
         } else if (event.code !== 1000) {
           state.errorCode = closeErrorCode(event.code, event.reason);
           state.error = closeReason(event.code, event.reason);
@@ -2086,8 +2217,13 @@ export function useVoiceWebSocket() {
     clearConnectWatchdog();
     clearLatencyProbes();
     rejectPendingCommands(new Error("语音连接已关闭"));
+    resetChannelInfos();
     const keepRememberedIdentity = lastConnection?.rememberIdentity === true;
-    if (!preserveConnection) lastConnection = null;
+    if (!preserveConnection) {
+      lastConnection = null;
+      // 显式离开（点「离开」或组件卸载）：刷新不该再把人拉回房间。
+      clearActiveSession();
+    }
     stopMicrophone();
     clearMicrophoneError();
     clearAudioNotice();
@@ -2389,6 +2525,57 @@ export function useVoiceWebSocket() {
     return peer;
   }
 
+  /**
+   * 屏幕共享的码率上限阶梯（按采集像素数选档）。
+   *
+   * 不设上限时浏览器会退回一个偏保守的屏幕内容目标码率，1080p 跑 30/60fps
+   * 明显不够 —— 实测表现就是「帧率上不去，降到 720p 帧率才涨」。
+   * 这里的值是**天花板而不是目标**：拥塞控制仍会在链路撑不住时把实际码率压下来，
+   * 所以给足余量是安全的。
+   */
+  function screenShareBitrateCeiling(width: number | null, height: number | null): number {
+    const pixels = (width ?? 0) * (height ?? 0);
+    if (pixels >= 1920 * 1080) return 6_000_000;
+    if (pixels >= 1280 * 720) return 3_500_000;
+    if (pixels > 0) return 2_000_000;
+    return 3_500_000;
+  }
+
+  /**
+   * 调屏幕共享发送端的编码参数。必须在 setLocalDescription 之后调用 ——
+   * encodings 只有协商出编解码器之后才非空，之前调 setParameters 拿不到可写的数组。
+   *
+   * 两件事：
+   *  - degradationPreference 默认是 balanced：带宽一紧张先牺牲帧率。直播看起来就是卡，
+   *    所以固定成 maintain-framerate（保帧率、必要时降分辨率）。
+   *  - 补上按分辨率的 maxBitrate 天花板 + 采集端的帧率上限。
+   */
+  async function applyScreenShareSenderParameters(peer: RTCPeerConnection): Promise<void> {
+    try {
+      const track = screenShareLocalStream?.getVideoTracks()[0];
+      if (!track) return;
+      const sender = peer.getSenders().find((candidate) => candidate.track === track);
+      if (!sender) return;
+      const parameters = sender.getParameters();
+      if (!parameters.encodings?.length) return;
+      const settings = track.getSettings();
+      const width = typeof settings.width === "number" ? settings.width : null;
+      const height = typeof settings.height === "number" ? settings.height : null;
+      const frameRate = typeof settings.frameRate === "number" ? Math.round(settings.frameRate) : null;
+      const ceiling = screenShareBitrateCeiling(width, height);
+      parameters.degradationPreference = "maintain-framerate";
+      parameters.encodings = parameters.encodings.map((encoding) => ({
+        ...encoding,
+        maxBitrate: ceiling,
+        ...(frameRate ? { maxFramerate: frameRate } : {}),
+      }));
+      await sender.setParameters(parameters);
+    } catch {
+      // 老浏览器可能拒绝 degradationPreference 或重写 encodings；
+      // 失败就退回浏览器默认，不影响出画面。
+    }
+  }
+
   function preferScreenShareCodecs(peer: RTCPeerConnection): void {
     const transceiver = peer.getTransceivers().find((candidate) => candidate.sender.track?.kind === "video" || candidate.receiver.track?.kind === "video");
     const capabilities = typeof RTCRtpReceiver !== "undefined" ? RTCRtpReceiver.getCapabilities?.("video") : null;
@@ -2442,6 +2629,7 @@ export function useVoiceWebSocket() {
     try {
       const offer = await peer.createOffer();
       await peer.setLocalDescription(offer);
+      void applyScreenShareSenderParameters(peer);
       armScreenSharePeerTimer(peerId);
       sendScreenShareMessage({
         type: "screenShareSignal",
@@ -2531,6 +2719,7 @@ export function useVoiceWebSocket() {
         await flushScreenShareCandidates(fromPeerId, peer);
         const answer = await peer.createAnswer();
         await peer.setLocalDescription(answer);
+        void applyScreenShareSenderParameters(peer);
         sendScreenShareMessage({ type: "screenShareSignal", streamId, targetPeerId: fromPeerId, signal: { kind: "answer", sdp: answer.sdp ?? "" } });
       } catch {
         setScreenShareP2PError("共享端无法完成观看者的直连协商");
@@ -2583,6 +2772,12 @@ export function useVoiceWebSocket() {
         // visible in the WebRTC diagnostics panel.
       }
       screenShareLocalStream = stream;
+      // 显示采集轨默认按「文本/细节」语义编码 —— 清晰度优先，帧率第一个被牺牲。
+      // 用户选了 >=30fps 说明要的是流畅（放视频/游戏），设成 motion；
+      // 选低帧率通常是在共享文档/代码，保留 text 让文字更锐利。
+      if ("contentHint" in videoTrack) {
+        videoTrack.contentHint = (settings?.maxFrameRate ?? 30) >= 30 ? "motion" : "text";
+      }
       screenShareRequestSequence = (screenShareRequestSequence + 1) % 1_000_000;
       screenSharePendingStartId = `screen-start-${screenShareRequestSequence}`;
       for (const track of stream.getTracks()) track.addEventListener("ended", () => { void stopScreenShare(); }, { once: true });
@@ -2690,6 +2885,7 @@ export function useVoiceWebSocket() {
         clearConnectWatchdog();
         clearReconnectWatchdog();
         state.connected = true;
+        markActiveSessionEstablished();
         state.connecting = false;
         state.reconnecting = false;
         state.reconnectAttempt = 0;
@@ -2855,6 +3051,7 @@ export function useVoiceWebSocket() {
           for (const channel of msg.channels) channels.push(channel);
         }
         syncKnownMemberVolumes();
+        refreshRestorableChannel();
         break;
       case "memberAvatar": {
         const clientId = Number(msg.id);
@@ -2952,6 +3149,8 @@ export function useVoiceWebSocket() {
         break;
       case "reconnectFailed":
         clearReconnectWatchdog();
+        // 重连窗口已耗尽：这条会话结束了，刷新不该再自动重连（否则会反复撞同一面墙）。
+        clearActiveSession();
         state.connected = false;
         state.connecting = false;
         state.reconnecting = false;
@@ -2965,6 +3164,9 @@ export function useVoiceWebSocket() {
       case "connectionFailed":
         clearConnectWatchdog();
         clearReconnectWatchdog();
+        // 服务端明确说这次连接失败了（密码错、被封禁、身份被占用、服务器满…）：
+        // 刷新后自动重连只会再失败一次，所以清掉恢复记录，让用户看到表单和原因。
+        clearActiveSession();
         state.connected = false;
         state.connecting = false;
         state.reconnecting = false;
@@ -3036,6 +3238,28 @@ export function useVoiceWebSocket() {
           }
         }
         break;
+      case "channelInfo":
+      case "channelInfoUnavailable": {
+        const requestId = typeof msg.requestId === "string" ? msg.requestId : "";
+        const pending = requestId ? pendingChannelInfos.get(requestId) : undefined;
+        if (!pending) break;
+        clearTimeout(pending.timer);
+        pendingChannelInfos.delete(requestId);
+        const channelId = typeof msg.channelId === "string" ? msg.channelId : "";
+        if (msg.type === "channelInfoUnavailable" || !channelId) {
+          pending.resolve(null);
+          break;
+        }
+        const details: ChannelInfoDetails = {
+          id: channelId,
+          name: typeof msg.name === "string" ? msg.name : "",
+          topic: typeof msg.topic === "string" ? msg.topic : "",
+          description: typeof msg.description === "string" ? msg.description : "",
+        };
+        channelInfos[channelId] = details;
+        pending.resolve(details);
+        break;
+      }
     }
   }
 
@@ -3077,6 +3301,41 @@ export function useVoiceWebSocket() {
 
   function moveClient(clientId: number, channelId: string, password = ""): Promise<void> {
     return sendCommandAndWait("moveClient", { clientId, channelId, ...(password ? { password } : {}) });
+  }
+
+  /**
+   * 取单个频道的详情（含「频道说明」）。
+   *
+   * 与 sendCommandAndWait 的区别：说明是可选信息，失败不应冒泡成全局错误提示，
+   * 所以这里自带缓存、超时和"拿不到就返回 null"的语义，由调用方决定空态展示。
+   */
+  function requestChannelInfo(channelId: string, timeoutMs = 8_000): Promise<ChannelInfoDetails | null> {
+    const cached = channelInfos[channelId];
+    if (cached) return Promise.resolve(cached);
+    const socket = ws.value;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return Promise.resolve(null);
+    const requestId = `channel-info-${Date.now().toString(36)}-${(channelInfoSequence++).toString(36)}`;
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        pendingChannelInfos.delete(requestId);
+        resolve(null);
+      }, timeoutMs);
+      pendingChannelInfos.set(requestId, { resolve, timer });
+      sendCmd("channelInfo", { channelId }, requestId);
+    });
+  }
+
+  function clearChannelInfoRequests(details: ChannelInfoDetails | null = null): void {
+    for (const [requestId, pending] of pendingChannelInfos) {
+      clearTimeout(pending.timer);
+      pendingChannelInfos.delete(requestId);
+      pending.resolve(details);
+    }
+  }
+
+  function resetChannelInfos(): void {
+    clearChannelInfoRequests();
+    for (const channelId of Object.keys(channelInfos)) delete channelInfos[channelId];
   }
 
   function measureLatency(timeoutMs = 2_200): Promise<LatencyProbeResult | null> {
@@ -3509,8 +3768,19 @@ export function useVoiceWebSocket() {
   return {
     ws,
     state,
+    /**
+     * 刷新后可以自动回到的房间（只有真正连上过、且没有被显式离开/判死时才有）。
+     * 由组件在挂载时读一次，用于自动重连。
+     */
+    readRestorableSession: (): ActiveSessionRecord | null => {
+      const record = readActiveSession();
+      return record?.established ? record : null;
+    },
     members,
     channels,
+    /** 按 cid 缓存的频道详情（含「频道说明」），由 requestChannelInfo 填充。 */
+    channelInfos,
+    requestChannelInfo,
     chatMessages,
     serverEvents,
     pokeNotifications,

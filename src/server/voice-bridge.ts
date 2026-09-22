@@ -1876,6 +1876,32 @@ async function handleCommand(
     return;
   }
 
+  if (command.type === "channelInfo") {
+    const channelId = command.payload.channelId as string;
+    try {
+      const info = await entry.tsClient.getChannelInfo(BigInt(channelId));
+      sendJson({
+        type: "channelInfo",
+        requestId: command.requestId,
+        channelId,
+        name: info.name,
+        topic: info.topic,
+        description: info.description,
+      });
+    } catch (error: unknown) {
+      // 说明是可选信息：这里不用通用 error 帧，避免把一个"取不到说明"的失败
+      // 升级成全局错误提示。浏览器侧收到 channelInfoUnavailable 只会回落到空态。
+      const operation = classifyOperationError(error, "CHANNEL_INFO_UNAVAILABLE", "无法读取频道说明");
+      sendJson({
+        type: "channelInfoUnavailable",
+        requestId: command.requestId,
+        channelId,
+        error: { code: operation.code, message: operation.message },
+      });
+    }
+    return;
+  }
+
   if (command.type === "switchChannel") {
     const rawId = command.payload.channelId as string;
     const channelPassword = typeof command.payload.password === "string" ? command.payload.password : "";
