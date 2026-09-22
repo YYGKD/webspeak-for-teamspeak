@@ -203,8 +203,8 @@
             <section :class="['chat-panel', { 'mobile-section-hidden': mobileSection !== 'chat' }]">
               <div class="chat-tabs" role="tablist" :aria-label="t('chatTabs')">
                 <button type="button" :class="{ active: chatTab === 'description' }" @click="chatTab = 'description'"><Icon name="info" :size="15" /> {{ t('channelDescription') }}</button>
-                <button type="button" :class="{ active: chatTab === 'channel' }" @click="chatTab = 'channel'"><Icon name="hash" :size="15" /> {{ currentChannelName }}</button>
-                <button type="button" :class="{ active: chatTab === 'server' }" @click="chatTab = 'server'"><Icon name="server" :size="15" /> {{ t('serverChat') }}</button>
+                <button type="button" :class="{ active: chatTab === 'channel' }" @click="chatTab = 'channel'"><Icon name="hash" :size="15" /> {{ t('channelMessages') }}</button>
+                <button type="button" :class="{ active: chatTab === 'server' }" @click="chatTab = 'server'"><Icon name="server" :size="15" /> {{ t('serverMessages') }}</button>
                 <button v-for="conversation in privateConversations" :key="conversation.id" type="button" :class="{ active: chatTab === 'private' && privateClientId === conversation.id }" @click="openPrivateChat(conversation.id)"><Icon name="message" :size="15" /> {{ conversation.name }}</button>
                 <button type="button" :class="{ active: chatTab === 'events' }" @click="chatTab = 'events'"><Icon name="bell" :size="15" /> {{ t('eventLog') }}</button>
               </div>
@@ -750,6 +750,8 @@ const translations: Record<string, Record<string, string>> = {
     chatStartLead: "发送一条消息，和频道里的朋友打个招呼吧。",
     chatTabs: "聊天标签",
     serverChat: "服务器",
+    channelMessages: "频道消息",
+    serverMessages: "服务器消息",
     privateMessage: "私聊",
     privateMessagePlaceholder: "发送私聊消息…",
     serverMessagePlaceholder: "发送服务器消息…",
@@ -1088,6 +1090,8 @@ const translations: Record<string, Record<string, string>> = {
     chatStartLead: "Send a message and say hello to your channel friends.",
     chatTabs: "Chat tabs",
     serverChat: "Server",
+    channelMessages: "Channel messages",
+    serverMessages: "Server messages",
     privateMessage: "Private message",
     privateMessagePlaceholder: "Message privately…",
     serverMessagePlaceholder: "Message the server…",
@@ -1420,6 +1424,8 @@ translations.de = {
   chatStartLead: "Sende eine Nachricht und begrüße deine Kanalmitglieder.",
   chatTabs: "Chat-Tabs",
   serverChat: "Server",
+  channelMessages: "Kanalnachrichten",
+  serverMessages: "Servernachrichten",
   privateMessage: "Private Nachricht",
   privateMessagePlaceholder: "Private Nachricht senden…",
   serverMessagePlaceholder: "Nachricht an den Server senden…",
@@ -1591,6 +1597,8 @@ translations.de = {
 
 translations.ru = {
   ...translations.en,
+  channelMessages: "Сообщения канала",
+  serverMessages: "Сообщения сервера",
   themeSystem: "Системная тема",
   themeLight: "Светлая тема",
   themeDark: "Тёмная тема",
@@ -1712,6 +1720,8 @@ translations.ru = {
 
 translations.ja = {
   ...translations.en,
+  channelMessages: "チャンネルのメッセージ",
+  serverMessages: "サーバーのメッセージ",
   themeSystem: "システム設定",
   themeLight: "ライトテーマ",
   themeDark: "ダークテーマ",
@@ -2329,8 +2339,8 @@ const visibleChatMessages = computed(() => {
   return chatMessages.filter((message) => message.scope === "channel" && (!message.targetId || message.targetId === "0" || !channelId || message.targetId === channelId));
 });
 
-const chatTabLabel = computed(() => chatTab.value === "channel" ? t("textChannel") : chatTab.value === "description" ? t("channelDescription") : chatTab.value === "server" ? t("serverChat") : chatTab.value === "private" ? t("privateMessage") : t("eventLog"));
-const chatTitle = computed(() => chatTab.value === "channel" ? t("channelChat", { channel: currentChannelName.value }) : chatTab.value === "description" ? t("channelDescription") : chatTab.value === "server" ? t("serverChat") : chatTab.value === "events" ? t("eventLog") : privateConversations.value.find((conversation) => conversation.id === privateClientId.value)?.name ?? t("privateMessage"));
+const chatTabLabel = computed(() => chatTab.value === "channel" ? t("channelMessages") : chatTab.value === "description" ? t("channelDescription") : chatTab.value === "server" ? t("serverMessages") : chatTab.value === "private" ? t("privateMessage") : t("eventLog"));
+const chatTitle = computed(() => chatTab.value === "channel" ? t("channelMessages") : chatTab.value === "description" ? t("channelDescription") : chatTab.value === "server" ? t("serverMessages") : chatTab.value === "events" ? t("eventLog") : privateConversations.value.find((conversation) => conversation.id === privateClientId.value)?.name ?? t("privateMessage"));
 const chatPlaceholder = computed(() => chatTab.value === "private" ? t("privateMessagePlaceholder") : chatTab.value === "server" ? t("serverMessagePlaceholder") : t("sendMessagePlaceholder"));
 
 /**
