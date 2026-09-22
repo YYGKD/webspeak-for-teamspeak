@@ -402,42 +402,67 @@ export class VoiceBridge {
         for (const channel of before.values()) if (!after.has(channel.id)) addServerEvent("left", `频道「${channel.name}」已删除`);
       };
       /**
-       * 把 TS 客户端显式移进欢迎页请求的频道。
+       * 确保 TS 客户端真的待在一个频道里。
        *
-       * TS6 不认 clientinit 里的 client_default_channel（按频道名传的那个），
-       * 客户端会留在 cid 0：服务器因此不向它转发任何频道语音，而
-       * normalizeDirectorySnapshot 又会把"自己"补进请求的频道，于是界面上看着
-       * 在频道里、实际一帧语音都收不到。这里按名字解析出频道 id 后显式移动一次
-       * （和浏览器点频道走的是同一条 clientmove 路径）。
+       * 两个原因让"界面上显示你在某频道、实际你在 cid 0"成为可能：
+       * 1) TS6 不认 clientinit 的 client_default_channel（按名字传的），
+       *    请求的频道不会生效；
+       * 2) 拿不到权威目录快照时（普通语音客户端没有 list 权限），
+       *    normalizeDirectorySnapshot 会把你补进请求的频道或频道树里的第一个频道。
+       *
+       * 所以这里把"界面显示的那个频道"真正执行出来：请求了频道就移过去，
+       * 没请求（或名字解析不到）且当前不在任何频道，就移进频道树里的第一个频道
+       * ——否则用户会停在没有频道的状态，服务器不向他转发任何语音，一帧都听不到。
        */
-      const joinRequestedChannel = async (): Promise<void> => {
+      const ensureChannel = async (): Promise<void> => {
         const requested = channelName?.trim().toLocaleLowerCase();
-        if (!requested) return;
-        let targetId: bigint | null = null;
-        for (const raw of entry!.channelTree) {
-          if (!isRecord(raw) || typeof raw.id !== "string") continue;
-          if (String(raw.name ?? "").trim().toLocaleLowerCase() !== requested) continue;
-          try {
-            targetId = BigInt(raw.id);
-          } catch {
-            continue;
+        const channelIdByName = (name: string): bigint | null => {
+          for (const raw of entry!.channelTree) {
+            if (!isRecord(raw) || typeof raw.id !== "string") continue;
+            if (String(raw.name ?? "").trim().toLocaleLowerCase() !== name) continue;
+            try {
+              return BigInt(raw.id);
+            } catch {
+              return null;
+            }
           }
-          break;
+          return null;
+        };
+        const firstChannelId = (): bigint | null => {
+          for (const raw of entry!.channelTree) {
+            if (!isRecord(raw) || typeof raw.id !== "string") continue;
+            try {
+              return BigInt(raw.id);
+            } catch {
+              return null;
+            }
+          }
+          return null;
+        };
+
+        const current = tsClient.getChannelId();
+        let targetId = requested ? channelIdByName(requested) : null;
+        let reason = "requested";
+        if (targetId === null && current === 0n) {
+          targetId = firstChannelId();
+          reason = "default";
         }
-        if (targetId === null || tsClient.getChannelId() === targetId) return;
+        if (targetId === null || current === targetId) return;
         try {
           await tsClient.switchChannel(targetId);
           this.logger.info({
             entryId: entry!.id,
-            channel: channelName,
+            channel: channelName || "(默认频道)",
             channelId: targetId.toString(),
-          }, "Moved into the requested channel");
+            reason,
+          }, "Moved into a channel");
         } catch (error: unknown) {
           this.logger.warn({
             err: error instanceof Error ? error.message : String(error),
             entryId: entry!.id,
-            channel: channelName,
-          }, "Could not move into the requested channel");
+            channel: channelName || "(默认频道)",
+            channelId: targetId.toString(),
+          }, "Could not move into a channel");
         }
       };
 
@@ -479,7 +504,7 @@ export class VoiceBridge {
         if (wasReconnecting) sendJson({ type: "reconnected" });
         scheduleMemberAvatarRefresh();
         // 频道树已经就绪，这时才解析得出请求频道的 id。
-        void joinRequestedChannel();
+        void ensureChannel();
       };
 
       let movePermissionProbeInFlight = false;
