@@ -913,25 +913,28 @@ export function useVoiceWebSocket() {
   }
 
   function createWebRtcMixStream(): MediaStream {
-    if (!micStream) throw new Error("没有可用的麦克风音轨");
     const ctx = getAudioCtx();
     stopWebRtcMix();
     const destination = ctx.createMediaStreamDestination();
     destination.channelCount = 1;
     destination.channelCountMode = "explicit";
-    // Use the browser-native processed track plus the browser-side RNNoise
-    // graph. Display/application audio is added separately below and never
-    // passes through this microphone denoiser.
-    const microphoneStream = processedMicDestination?.stream ?? micStream;
-    const microphoneSource = ctx.createMediaStreamSource(microphoneStream);
-    const microphoneGain = ctx.createGain();
-    microphoneGain.gain.value = microphoneMuted.value ? 0 : inputVolume.value;
-    microphoneSource.connect(microphoneGain);
-    microphoneGain.connect(destination);
+    // 麦克风是可选的：没有麦克风时这条轨就是纯静音（只有伴奏时才接伴奏）。
+    // slot0 仍然按 sendrecv 协商，服务端的 m-line 数量与方向不受影响。
+    if (micStream) {
+      // Use the browser-native processed track plus the browser-side RNNoise
+      // graph. Display/application audio is added separately below and never
+      // passes through this microphone denoiser.
+      const microphoneStream = processedMicDestination?.stream ?? micStream;
+      const microphoneSource = ctx.createMediaStreamSource(microphoneStream);
+      const microphoneGain = ctx.createGain();
+      microphoneGain.gain.value = microphoneMuted.value ? 0 : inputVolume.value;
+      microphoneSource.connect(microphoneGain);
+      microphoneGain.connect(destination);
+      webrtcMixMicSource = microphoneSource;
+      webrtcMixMicGain = microphoneGain;
+    }
 
     webrtcMixDestination = destination;
-    webrtcMixMicSource = microphoneSource;
-    webrtcMixMicGain = microphoneGain;
 
     const accompanimentTrack = accompanimentStream?.getAudioTracks()[0];
     if (accompanimentTrack) {
@@ -1040,16 +1043,24 @@ export function useVoiceWebSocket() {
 
   async function startWebRtcTransport(sequence: number, socket: WebSocket): Promise<void> {
     if (typeof RTCPeerConnection === "undefined") throw new Error("当前浏览器不支持 WebRTC");
-    await ensureMicrophone();
-    if (sequence !== connectionSequence || socket.readyState !== WebSocket.OPEN || !micStream) return;
-    const microphoneTrack = micStream.getAudioTracks()[0];
-    if (!microphoneTrack) throw new Error("没有可用的麦克风音轨");
+    // 麦克风尽力而为：拿不到也继续协商（slot0 发静音）。否则"只想听"的用户
+    // （例如只听音乐机器人）会因为麦克风被拒、没有设备或非安全上下文被迫退回
+    // 兼容传输 —— 那条路径的过期音频丢弃策略对连续音频明显更差，音乐听起来
+    // 就是一断一续。
+    try {
+      await ensureMicrophone();
+    } catch {
+      // startMicrophone 已记录 microphoneError，界面照旧提示；
+      // 这里只降级成"没有上行"，不影响下行实时音频。
+    }
+    if (sequence !== connectionSequence || socket.readyState !== WebSocket.OPEN) return;
+    const microphoneTrack = micStream?.getAudioTracks()[0] ?? null;
 
     stopCaptureGraph();
     const peer = new RTCPeerConnection({ iceServers: activeIceServers });
     webrtcPeer = peer;
     webrtcFallbackStarted = false;
-    microphoneTrack.enabled = !microphoneMuted.value;
+    if (microphoneTrack) microphoneTrack.enabled = !microphoneMuted.value;
     const mixedStream = createWebRtcMixStream();
     const mixedTrack = mixedStream.getAudioTracks()[0];
     if (!mixedTrack) throw new Error("混合音频轨道创建失败");
@@ -1072,7 +1083,7 @@ export function useVoiceWebSocket() {
       attachSfuSlot(slot, new MediaStream([event.track]));
     };
     startSfuActivityMonitor();
-    startWebRtcMicMonitor(getAudioCtx(), micStream, microphoneTrack);
+    if (micStream && microphoneTrack) startWebRtcMicMonitor(getAudioCtx(), micStream, microphoneTrack);
     peer.onconnectionstatechange = () => {
       if (peer.connectionState === "failed") void fallbackFromWebRtc(sequence, socket, "WEBRTC_CONNECTION_FAILED");
     };
@@ -2424,6 +2435,13 @@ export function useVoiceWebSocket() {
     accumLen = 0;
     if (webrtcActive.value) micStream?.getAudioTracks().forEach((track) => { track.enabled = !muted; });
     if (webrtcMixMicGain) webrtcMixMicGain.gain.value = muted ? 0 : inputVolume.value;
+    // 会话可能是在"没有麦克风"的情况下走 WebRTC 开始的（只听模式）。
+    // 这次开麦时把麦克风取回来，并替换 slot0 上那条静音轨。
+    if (!muted && !micStream) {
+      void ensureMicrophone()
+        .then(() => (webrtcActive.value ? replaceWebRtcAudioTrack() : undefined))
+        .catch(() => undefined);
+    }
     sendCmd("setMicrophoneMuted", { muted });
     if (muted && state.tsClientId) clearSpeaking(state.tsClientId);
     void saveAudioPreferences();
