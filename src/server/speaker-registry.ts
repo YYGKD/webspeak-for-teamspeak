@@ -5,6 +5,51 @@ import { RtpHeader, RtpPacket } from "werift";
 const AUDIO_FRAME_SAMPLES = 960;
 const DEFAULT_WEBRTC_OPUS_PAYLOAD_TYPE = 111;
 
+/** 48kHz 下每毫秒的采样数。 */
+const SAMPLES_PER_MS = 48;
+/** Opus 单包采样数上下限（RFC 6716：单帧 2.5～60ms，单包最多 2 帧）。 */
+const MIN_PACKET_SAMPLES = 120;
+const MAX_PACKET_SAMPLES = 5760;
+
+/**
+ * Opus 的 config → 每帧时长（毫秒），RFC 6716 §3.1。
+ *
+ * TeamSpeak 的 codec 5（Opus Music）用 60ms 帧，codec 4（Opus Voice）用 20ms。
+ * 时间戳增量必须按真实帧长推进：写死 20ms 会让音乐流的 RTP 时间轴慢 3 倍，
+ * 接收端 jitter buffer 只能不断"加速/丢样"追赶，听感就是一断一续。
+ */
+const OPUS_FRAME_MS: readonly number[] = [
+  10, 20, 40, 60, //  0-3   SILK 窄带
+  10, 20, 40, 60, //  4-7   SILK 中带
+  10, 20, 40, 60, //  8-11  SILK 宽带
+  10, 20, // 12-13 混合 超宽带
+  10, 20, // 14-15 混合 全带
+  2.5, 5, 10, 20, // 16-19 CELP 窄带
+  2.5, 5, 10, 20, // 20-23 CELP 中带
+  2.5, 5, 10, 20, // 24-27 CELP 超宽带
+  2.5, 5, 10, 20, // 28-31 CELP 全带
+];
+
+/**
+ * 一个 Opus 包实际携带的采样数（48kHz）。
+ *
+ * TOC 字节：高 5 位 config 决定每帧时长，低 2 位是帧数代码
+ * （0=1 帧、1=2 帧、2=2 帧、3=1 帧）。解析不出来时回落到 20ms，
+ * 保持旧行为，不会让异常包得到更糟的结果。
+ */
+export function opusPacketSamples(payload: Buffer): number {
+  if (payload.length < 1) return AUDIO_FRAME_SAMPLES;
+  const toc = payload[0] as number;
+  const config = toc >> 3;
+  const frameCode = toc & 0b11;
+  const frames = frameCode === 0 || frameCode === 3 ? 1 : 2;
+  const frameMs = OPUS_FRAME_MS[config];
+  if (frameMs === undefined) return AUDIO_FRAME_SAMPLES;
+  const samples = Math.round(frameMs * SAMPLES_PER_MS) * frames;
+  if (samples < MIN_PACKET_SAMPLES || samples > MAX_PACKET_SAMPLES) return AUDIO_FRAME_SAMPLES;
+  return samples;
+}
+
 /**
  * slot 用尽时，只有静默超过这个时长的说话人才会被淘汰。
  * 取值远大于一帧（20ms），这样"大家都在说"时不会每帧互相挤。见 acquireSlot。
@@ -42,7 +87,7 @@ export class SpeakerStream {
       marker: this.sequenceNumber === this.firstSequenceNumber,
     }), opus);
     this.sequenceNumber = (this.sequenceNumber + 1) & 0xffff;
-    this.timestamp = (this.timestamp + AUDIO_FRAME_SAMPLES) >>> 0;
+    this.timestamp = (this.timestamp + opusPacketSamples(opus)) >>> 0;
     this.lastActiveAt = Date.now();
     return packet.serialize();
   }

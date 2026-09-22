@@ -1536,6 +1536,20 @@ export function useVoiceWebSocket() {
     }
   }
 
+  /**
+   * 每个说话人最近一帧的时长（秒），由解码结果测得。
+   *
+   * 兼容传输的播放上限 80ms 是按 20ms 帧定的；TeamSpeak 的 Opus Music
+   * （codec 5）用 60ms 帧 —— 一帧就占 60ms、两帧 120ms，固定上限会让每一帧
+   * 都被判成"过期"并重置播放，听感就是一断一续。
+   */
+  const remoteFrameSeconds = new Map<number, number>();
+
+  /** 播放上限：固定 80ms，但至少容纳该说话人的两帧。 */
+  function remotePlayAheadLimit(clientId: number): number {
+    return Math.max(MAX_REMOTE_PLAY_AHEAD_SECONDS, (remoteFrameSeconds.get(clientId) ?? 0) * 2);
+  }
+
   function playAudioFrame(clientId: number, opusData: Uint8Array): void {
     if (opusData.length < 3) return;
     let decoder = remoteDecoders.get(clientId);
@@ -1545,7 +1559,7 @@ export function useVoiceWebSocket() {
     const decodeQueueSize = decoder?.decodeQueueSize ?? 0;
     if (
       decoder &&
-      (scheduledUntil > now + MAX_REMOTE_PLAY_AHEAD_SECONDS || decodeQueueSize >= MAX_REMOTE_DECODE_QUEUE_FRAMES)
+      (scheduledUntil > now + remotePlayAheadLimit(clientId) || decodeQueueSize >= MAX_REMOTE_DECODE_QUEUE_FRAMES)
     ) {
       resetRemotePlayback(clientId);
       decoder = undefined;
@@ -1565,6 +1579,8 @@ export function useVoiceWebSocket() {
           }
           try {
             const { sampleRate, numberOfChannels, numberOfFrames } = chunk;
+            // 记录真实帧长：Opus Music（60ms）与 Opus Voice（20ms）共用这条路径。
+            remoteFrameSeconds.set(clientId, numberOfFrames / sampleRate);
             const buffer = ctx.createBuffer(numberOfChannels, numberOfFrames, sampleRate);
             for (let ch = 0; ch < numberOfChannels; ch++) {
               const data = new Float32Array(numberOfFrames);
@@ -1587,7 +1603,7 @@ export function useVoiceWebSocket() {
             }, { once: true });
             let playTime = remotePlayTimes.get(clientId) ?? ctx.currentTime;
             if (playTime < ctx.currentTime) playTime = ctx.currentTime;
-            if (playTime + numberOfFrames / sampleRate > ctx.currentTime + MAX_REMOTE_PLAY_AHEAD_SECONDS) {
+            if (playTime + numberOfFrames / sampleRate > ctx.currentTime + remotePlayAheadLimit(clientId)) {
               source.disconnect();
               sources.delete(source);
               if (sources.size === 0) remotePlaybackSources.delete(clientId);
@@ -1617,8 +1633,10 @@ export function useVoiceWebSocket() {
 
     try {
       const timestamp = remoteDecodeTimestamps.get(clientId) ?? 0;
-      decoder.decode(new EncodedAudioChunk({ type: "key", timestamp, duration: 20_000, data: opusData }));
-      remoteDecodeTimestamps.set(clientId, timestamp + 20_000);
+      // 解码时间轴也按真实帧长推进（20ms 只是首帧前的默认值）。
+      const frameMicros = Math.round((remoteFrameSeconds.get(clientId) ?? 0.02) * 1_000_000);
+      decoder.decode(new EncodedAudioChunk({ type: "key", timestamp, duration: frameMicros, data: opusData }));
+      remoteDecodeTimestamps.set(clientId, timestamp + frameMicros);
     } catch {
       // Ignore malformed frames; the next valid frame can still be decoded.
     }
