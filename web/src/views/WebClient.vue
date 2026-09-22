@@ -203,7 +203,7 @@
             <section :class="['chat-panel', { 'mobile-section-hidden': mobileSection !== 'chat' }]">
               <div class="chat-tabs" role="tablist" :aria-label="t('chatTabs')">
                 <button type="button" :class="{ active: chatTab === 'description' }" @click="chatTab = 'description'"><Icon name="info" :size="15" /> {{ t('channelDescription') }}</button>
-                <button type="button" :class="{ active: chatTab === 'channel' }" @click="chatTab = 'channel'"><Icon name="hash" :size="15" /> {{ t('channelMessages') }}</button>
+                <button type="button" :class="{ active: chatTab === 'channel' }" @click="chatTab = 'channel'">{{ t('channelMessages') }}</button>
                 <button type="button" :class="{ active: chatTab === 'server' }" @click="chatTab = 'server'"><Icon name="server" :size="15" /> {{ t('serverMessages') }}</button>
                 <button v-for="conversation in privateConversations" :key="conversation.id" type="button" :class="{ active: chatTab === 'private' && privateClientId === conversation.id }" @click="openPrivateChat(conversation.id)"><Icon name="message" :size="15" /> {{ conversation.name }}</button>
                 <button type="button" :class="{ active: chatTab === 'events' }" @click="chatTab = 'events'"><Icon name="bell" :size="15" /> {{ t('eventLog') }}</button>
