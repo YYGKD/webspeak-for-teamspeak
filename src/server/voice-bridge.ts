@@ -401,6 +401,46 @@ export class VoiceBridge {
         }
         for (const channel of before.values()) if (!after.has(channel.id)) addServerEvent("left", `频道「${channel.name}」已删除`);
       };
+      /**
+       * 把 TS 客户端显式移进欢迎页请求的频道。
+       *
+       * TS6 不认 clientinit 里的 client_default_channel（按频道名传的那个），
+       * 客户端会留在 cid 0：服务器因此不向它转发任何频道语音，而
+       * normalizeDirectorySnapshot 又会把"自己"补进请求的频道，于是界面上看着
+       * 在频道里、实际一帧语音都收不到。这里按名字解析出频道 id 后显式移动一次
+       * （和浏览器点频道走的是同一条 clientmove 路径）。
+       */
+      const joinRequestedChannel = async (): Promise<void> => {
+        const requested = channelName?.trim().toLocaleLowerCase();
+        if (!requested) return;
+        let targetId: bigint | null = null;
+        for (const raw of entry!.channelTree) {
+          if (!isRecord(raw) || typeof raw.id !== "string") continue;
+          if (String(raw.name ?? "").trim().toLocaleLowerCase() !== requested) continue;
+          try {
+            targetId = BigInt(raw.id);
+          } catch {
+            continue;
+          }
+          break;
+        }
+        if (targetId === null || tsClient.getChannelId() === targetId) return;
+        try {
+          await tsClient.switchChannel(targetId);
+          this.logger.info({
+            entryId: entry!.id,
+            channel: channelName,
+            channelId: targetId.toString(),
+          }, "Moved into the requested channel");
+        } catch (error: unknown) {
+          this.logger.warn({
+            err: error instanceof Error ? error.message : String(error),
+            entryId: entry!.id,
+            channel: channelName,
+          }, "Could not move into the requested channel");
+        }
+      };
+
       const sendInitialState = () => {
         if (initialStateSent || !tsReady || !directory.ready || !realtimeReady || !audioReady || session.state !== "syncing") return;
         initialStateSent = true;
@@ -438,6 +478,8 @@ export class VoiceBridge {
         sendJson({ type: "channelList", channels: entry!.channelTree });
         if (wasReconnecting) sendJson({ type: "reconnected" });
         scheduleMemberAvatarRefresh();
+        // 频道树已经就绪，这时才解析得出请求频道的 id。
+        void joinRequestedChannel();
       };
 
       let movePermissionProbeInFlight = false;
