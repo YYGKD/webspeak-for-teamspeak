@@ -61,6 +61,17 @@ export interface TSChannelInfo {
   description: string;
 }
 
+/** 单个客户端的实时状态（成员列表里的静音/离开/指挥官标记）。 */
+export interface TSClientState {
+  nickname: string;
+  uid: string;
+  inputMuted: boolean;
+  outputMuted: boolean;
+  away: boolean;
+  awayMessage: string;
+  channelCommander: boolean;
+}
+
 export interface TSChatMessage {
   invokerName: string;
   invokerId: number;
@@ -408,6 +419,33 @@ export class TSClient extends EventEmitter {
       }, "TeamSpeak channel info unavailable");
       throw error;
     }
+  }
+
+  /**
+   * 读取单个客户端的实时状态（麦克风/扬声器静音、离开、频道指挥官）。
+   *
+   * 为什么必须按 clid 单查：成员是随 `notifycliententerview` 进目录的，那条通知不带
+   * `client_input_muted` / `client_output_muted`；批量接口 `clientlist -muted` 与
+   * `clientfind` 在普通权限下被服务器拒绝（实测 2568），而 `clientinfo clid=N` 有权限
+   * （单次约 20ms，与 `channelinfo` 同级）。不查的话，"连接前就已经静音"的人会一直显示
+   * 为未静音，和原生客户端不一致。
+   */
+  async getClientState(clientId: number): Promise<TSClientState> {
+    if (!this.client || !this.connected) throw new Error("TeamSpeak session is not ready");
+    const rows = await this.execCommandWithResponse(`clientinfo clid=${clientId}`, 5_000);
+    const row = rows[0];
+    if (!row) throw new Error(`no data returned for client ${clientId}`);
+    return {
+      nickname: row.client_nickname ?? "",
+      uid: row.client_unique_identifier ?? "",
+      inputMuted: row.client_input_muted === "1",
+      // TS3/TS6 里"扬声器静音"可能落在 output_muted 或 outputonly_muted 上，
+      // 两者都表示对方听不到我们说话，取或即可。
+      outputMuted: row.client_output_muted === "1" || row.client_outputonly_muted === "1",
+      away: row.client_away === "1",
+      awayMessage: row.client_away_message ?? "",
+      channelCommander: row.client_is_channel_commander === "1",
+    };
   }
 
   /**

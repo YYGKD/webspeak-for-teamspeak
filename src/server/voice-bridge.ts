@@ -148,6 +148,10 @@ interface WebClientEntry {
   /** 已下发给浏览器的 slot → clientId 映射，用于检测归属变化。 */
   slotOwner: Map<number, number>;
   lastLatencyProbeAt: number;
+  /** 最近一次用 clientinfo 补齐成员状态的时间（按 clid），用于限速与去重。 */
+  clientStateRefreshedAt: Map<number, number>;
+  /** 成员静音状态补全的周期定时器；随会话清理。 */
+  clientStateSweepTimer: ReturnType<typeof setInterval> | null;
   connectionFailureCode?: string;
   screenPeerId: string;
 }
@@ -292,6 +296,8 @@ export class VoiceBridge {
         registry: new SpeakerRegistry(resolveWebRtcSlotCount()),
         slotOwner: new Map(),
         lastLatencyProbeAt: 0,
+        clientStateRefreshedAt: new Map(),
+        clientStateSweepTimer: null,
         screenPeerId: entryId,
       };
       this.entries.set(entryId, entry!);
@@ -368,6 +374,63 @@ export class VoiceBridge {
           sendJson({ type: "whisperTargets", targetIds: nextWhisperTargets, active: entry!.whisperActive });
         }
       };
+      /**
+       * 成员状态补全（静音 / 硬件 / 离开 / 指挥官）。
+       *
+       * 成员是随 `notifycliententerview` 进目录的，那条通知不带静音字段；批量接口
+       * `clientlist -muted`、`clientfind` 在普通权限下被服务器拒绝（实测 2568）。
+       * 结果就是"在网页端连接之前就已经静音"的人一直显示为未静音，和原生客户端不一致。
+       * `clientinfo clid=N` 有权限（实测 ~20ms），所以按 clid 逐条补：限速 4 条/秒、
+       * 每条 60s 内不重复查，避免触发服务器的洪水防护；只有真正变化才回推 channelList。
+       */
+      const CLIENT_STATE_STALE_MS = 60_000;
+      const CLIENT_STATE_SWEEP_BATCH = 4;
+      const CLIENT_STATE_SWEEP_INTERVAL_MS = 1_000;
+      const sweepClientStates = async (): Promise<void> => {
+        if (!entry || !entry.isAlive || !tsReady || session.state !== "connected") return;
+        const snapshot = directory.getSnapshot();
+        if (!snapshot) return;
+        const now = Date.now();
+        const stale = snapshot.clients
+          .filter((client) => client.id > 0 && now - (entry!.clientStateRefreshedAt.get(client.id) ?? 0) >= CLIENT_STATE_STALE_MS)
+          .slice(0, CLIENT_STATE_SWEEP_BATCH);
+        if (!stale.length) return;
+        let changed = false;
+        for (const client of stale) {
+          entry.clientStateRefreshedAt.set(client.id, Date.now());
+          try {
+            const state = await entry.tsClient.getClientState(client.id);
+            const next = {
+              ...client,
+              nickname: state.nickname || client.nickname,
+              uid: state.uid || client.uid,
+              away: state.away,
+              awayMessage: state.awayMessage,
+              inputMuted: state.inputMuted,
+              outputMuted: state.outputMuted,
+              channelCommander: state.channelCommander,
+            };
+            if (
+              client.away !== next.away ||
+              client.awayMessage !== next.awayMessage ||
+              client.inputMuted !== next.inputMuted ||
+              client.outputMuted !== next.outputMuted ||
+              client.channelCommander !== next.channelCommander
+            ) {
+              directory.applyClientUpdated(next);
+              changed = true;
+            }
+          } catch {
+            // 单条失败（离线 / 超时 / 服务器差异）不影响其它成员，下个周期会重试。
+          }
+        }
+        if (!changed || !entry || !entry.isAlive) return;
+        refreshDirectory();
+        if (initialStateSent) sendJson({ type: "channelList", channels: entry.channelTree });
+      };
+      entry.clientStateSweepTimer = setInterval(() => { void sweepClientStates(); }, CLIENT_STATE_SWEEP_INTERVAL_MS);
+      entry.clientStateSweepTimer.unref?.();
+
       const scheduleMemberAvatarRefresh = (delayMs = 0): void => {
         if (!entry || !entry.isAlive || avatarRefreshTimer) return;
         avatarRefreshTimer = setTimeout(() => {
@@ -1049,6 +1112,11 @@ export class VoiceBridge {
       clearTimeout(entry.reconnectTimer);
       entry.reconnectTimer = null;
     }
+    if (entry.clientStateSweepTimer) {
+      clearInterval(entry.clientStateSweepTimer);
+      entry.clientStateSweepTimer = null;
+    }
+    entry.clientStateRefreshedAt.clear();
     entry.opusEncoder = null;
     const webRtc = entry.webrtc;
     entry.webrtc = null;
