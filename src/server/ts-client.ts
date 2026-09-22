@@ -70,6 +70,12 @@ export interface TSClientState {
   away: boolean;
   awayMessage: string;
   channelCommander: boolean;
+  /**
+   * TS3 用来标识头像内容的哈希（`client_flag_avatar`）；无头像时为空串。
+   * 它一变就说明对方换了头像 —— 这是通知路径拿不到的信号：SDK 会消费
+   * `notifyclientupdated` 而不透传，所以只能靠这条轮询发现变更。
+   */
+  avatarFlag: string;
 }
 
 export interface TSChatMessage {
@@ -445,6 +451,7 @@ export class TSClient extends EventEmitter {
       away: row.client_away === "1",
       awayMessage: row.client_away_message ?? "",
       channelCommander: row.client_is_channel_commander === "1",
+      avatarFlag: row.client_flag_avatar ?? "",
     };
   }
 

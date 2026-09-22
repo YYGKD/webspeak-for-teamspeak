@@ -152,6 +152,8 @@ interface WebClientEntry {
   clientStateRefreshedAt: Map<number, number>;
   /** 成员静音状态补全的周期定时器；随会话清理。 */
   clientStateSweepTimer: ReturnType<typeof setInterval> | null;
+  /** 每个 uid 最近一次看到的头像哈希（`client_flag_avatar`），用于发现"换了头像"。 */
+  avatarFlagByUid: Map<string, string>;
   connectionFailureCode?: string;
   screenPeerId: string;
 }
@@ -298,6 +300,7 @@ export class VoiceBridge {
         lastLatencyProbeAt: 0,
         clientStateRefreshedAt: new Map(),
         clientStateSweepTimer: null,
+        avatarFlagByUid: new Map(),
         screenPeerId: entryId,
       };
       this.entries.set(entryId, entry!);
@@ -396,6 +399,7 @@ export class VoiceBridge {
           .slice(0, CLIENT_STATE_SWEEP_BATCH);
         if (!stale.length) return;
         let changed = false;
+        let avatarChanged = false;
         for (const client of stale) {
           entry.clientStateRefreshedAt.set(client.id, Date.now());
           try {
@@ -420,10 +424,24 @@ export class VoiceBridge {
               directory.applyClientUpdated(next);
               changed = true;
             }
+            // 头像变更检测：`client_flag_avatar` 变了就丢弃缓存，让 refreshMemberAvatars
+            // 重新取一次并推给浏览器。原来每个 uid 一个会话只取一次，线上表现就是
+            // "不刷新页面看不到机器人换的新头像（换歌 = 换专辑封面）"。
+            if (next.uid) {
+              const previousFlag = entry.avatarFlagByUid.get(next.uid);
+              if (previousFlag === undefined) {
+                entry.avatarFlagByUid.set(next.uid, state.avatarFlag);
+              } else if (previousFlag !== state.avatarFlag) {
+                entry.avatarFlagByUid.set(next.uid, state.avatarFlag);
+                entry.avatarCache.delete(next.uid);
+                avatarChanged = true;
+              }
+            }
           } catch {
             // 单条失败（离线 / 超时 / 服务器差异）不影响其它成员，下个周期会重试。
           }
         }
+        if (avatarChanged) scheduleMemberAvatarRefresh(0);
         if (!changed || !entry || !entry.isAlive) return;
         refreshDirectory();
         if (initialStateSent) sendJson({ type: "channelList", channels: entry.channelTree });
@@ -454,9 +472,10 @@ export class VoiceBridge {
               const avatar = loaded ? avatarDataUrl(loaded.data) : null;
               entry.avatarCache.set(member.uid, avatar);
               const current = entry.members.get(member.id);
-              if (current && current.uid === member.uid && avatar) {
-                current.avatar = avatar;
-                sendJson({ type: "memberAvatar", id: member.id, uid: member.uid, avatar });
+              // 头像被换掉（含被清空）时也要推一次，否则浏览器会一直显示旧图。
+              if (current && current.uid === member.uid && (current.avatar ?? null) !== avatar) {
+                current.avatar = avatar ?? undefined;
+                sendJson({ type: "memberAvatar", id: member.id, uid: member.uid, avatar: avatar ?? "" });
               }
             } catch (error: unknown) {
               // Avatar access is optional. A permission or file-transfer failure
@@ -1117,6 +1136,7 @@ export class VoiceBridge {
       entry.clientStateSweepTimer = null;
     }
     entry.clientStateRefreshedAt.clear();
+    entry.avatarFlagByUid.clear();
     entry.opusEncoder = null;
     const webRtc = entry.webrtc;
     entry.webrtc = null;
