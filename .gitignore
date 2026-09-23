@@ -7,3 +7,9 @@ config.json
 .env
 webspeak-update.tar.gz
 claude.pem
+
+# 本地运维留档（含服务器拓扑/端口信息，勿提交）
+.local/
+
+# 会话留档已迁至 .local/memory/，此处只留指路牌（memory/README.md）
+memory/
