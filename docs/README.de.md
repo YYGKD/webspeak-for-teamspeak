@@ -58,10 +58,16 @@ WebRTC verwendet für Browser-Sprache einen Echtzeit-Medienpfad und ermöglicht 
 
 1. Unter `/admin` anmelden und auf der Seite **Server** die **Erweiterten Einstellungen** öffnen.
 2. Bei deaktiviertem WebRTC Start- und Endport für UDP festlegen. Der Standardbereich ist `40000–40099`.
-3. Den gesamten UDP-Bereich in Sicherheitsgruppe und Firewall des WebSpeak-Hosts freigeben.
+3. Den gesamten Bereich `40000–40099` für **UDP und TCP** in Sicherheitsgruppe und Firewall des WebSpeak-Hosts freigeben (TCP dient als ICE-over-TCP-Fallback).
 4. **WebRTC** aktivieren und speichern. Nicht unterstützte Browser oder Netzwerke wechseln automatisch zum kompatiblen Transport.
 
 Der Portbereich ist bei aktiviertem WebRTC gesperrt. Zum Ändern WebRTC zuerst deaktivieren und speichern, danach die Firewall-Regeln anpassen. Für öffentliche Bereitstellungen ist HTTPS erforderlich.
+
+Die Medien laufen über die integrierte **mediasoup**-Engine (einzige Engine): Sprecher werden dynamisch über `clientId ↔ producerId ↔ consumerId` publiziert und abonniert – ohne reservierte Audio-m-Lines und ohne Slot-Obergrenze. Alle zugehörigen Umgebungsvariablen sind optional:
+
+- `MEDIASOUP_WORKER_BIN`: Pfad zur mediasoup-Worker-Binary; standardmäßig wird das mitgelieferte, vorcompilierte `vendor/mediasoup-worker/`-Artefakt verwendet und gegen seine SHA256 geprüft. Release-Pakete und Docker-Image enthalten es bereits.
+- `WEBSPEAK_MAX_SPEAKERS`: gleichzeitig publizierte Sprecher pro Sitzung (1–64, Standard 32).
+- `WEBSPEAK_MEDIA_PUBLIC_HOST`: öffentliche Medienadresse für Proxy-/Port-Mapping-Setups (wird als `announcedAddress` in den ICE-Kandidaten geschrieben); weglassen, wenn Medien- und Listen-Adresse identisch sind.
 
 ### ICE-Kandidaten für Bildschirmfreigabe
 
@@ -142,7 +148,7 @@ Relay deaktivieren und speichern, um die Option von der Willkommensseite zu entf
 ### 3. Abhängigkeiten und Hinweise zur Herkunft
 
 - Der Relay-Dienst ist Bestandteil von WebSpeak und verwendet Node.js-Standardbibliotheken; GOST, sing-box oder ein anderes Proxy-Framework werden nicht verwendet.
-- WebRTC verwendet [werift](https://github.com/shinyoshiaki/werift-webrtc) `0.24.4`; das Upstream-Projekt steht unter MIT-Lizenz.
+- WebRTC-Medien werden von [mediasoup](https://mediasoup.org/) `3.27.1` übertragen (ISC-Lizenz). Die frühere werift-Engine ist außer Betrieb und bleibt nur als Testdouble in den Entwicklungsabhängigkeiten erhalten.
 - Die TeamSpeak-Protokollverbindung verwendet den projektgepflegten [EchoSixHIYA/teamspeak-js](https://github.com/EchoSixHIYA/teamspeak-js)-SDK-Fork.
 
 ## 🧾 Änderungsprotokoll
@@ -180,7 +186,7 @@ docker compose pull
 docker compose up -d
 ```
 
-Nach dem Start ist WebSpeak unter `http://<dein-host>:3040` erreichbar. Bei einem Reverse Proxy auf diese Adresse zeigen; für WebRTC den im Adminbereich angezeigten UDP-Bereich freigeben. Die Daten liegen im Volume `webspeak-data`.
+Nach dem Start ist WebSpeak unter `http://<dein-host>:3040` erreichbar. Bei einem Reverse Proxy auf diese Adresse zeigen; für WebRTC den im Adminbereich angezeigten UDP/TCP-Portbereich freigeben. Die Daten liegen im Volume `webspeak-data`.
 
 ```bash
 docker compose ps
@@ -222,7 +228,7 @@ Für den Bau von `@discordjs/opus` werden Python, Make und eine C/C++-Toolchain 
 1. `http://<dein-host>:3040/admin` öffnen.
 2. Mit `admin` / `admin` anmelden und sofort ein neues Passwort mit mindestens 12 Zeichen setzen.
 3. Unter **Server** TeamSpeak-Ziel und Zugriffsmethode konfigurieren, zum Beispiel `voice.example.com#9987`.
-4. Für öffentliche Nutzung HTTPS einrichten; bei aktiviertem WebRTC den im Adminbereich angezeigten UDP-Bereich freigeben.
+4. Für öffentliche Nutzung HTTPS einrichten; bei aktiviertem WebRTC den im Adminbereich angezeigten UDP/TCP-Portbereich freigeben.
 
 ## ⚠️ Voraussetzungen und Hinweise
 
@@ -232,7 +238,7 @@ Für den Bau von `@discordjs/opus` werden Python, Make und eine C/C++-Toolchain 
 | TeamSpeak-Netzwerk | Der WebSpeak-Host muss den Zielserver erreichen können; der Standard-Sprachport ist `9987`. |
 | Webnetzwerk | Der Dienst verwendet `3040/TCP`; öffentlich sollte ein HTTPS-Reverse-Proxy für Seite und WebSocket verwendet werden. |
 | IPv6 | Literale Ziele als `[2001:db8::1]#9987` eintragen. Host/Container benötigen geroutetes IPv6, aktiviertes IPv6 in Betriebssystem und Node.js sowie passende Firewall-Regeln. |
-| WebRTC | Standardbereich `40000–40099/UDP`; den gesamten Bereich freigeben und WebRTC vor einer Änderung deaktivieren. |
+| WebRTC | Standardbereich `40000–40099` für UDP und TCP; den gesamten Bereich freigeben und WebRTC vor einer Änderung deaktivieren. |
 | Gespeicherte Identität | Eine Browseridentität kann nur eine aktive gespeicherte Verbindung halten. Für parallele Verbindungen deaktivieren oder ein anderes Browserprofil verwenden. |
 | Begleitton | Nur auf dem Desktop verfügbar und WebRTC erforderlich. Bei Fenster- oder Tab-Freigabe auch Audio freigeben. |
 | Daten | Docker verwendet `webspeak-data`; Release-Pakete und Quellcode verwenden `data/`. Vor Updates sichern. |

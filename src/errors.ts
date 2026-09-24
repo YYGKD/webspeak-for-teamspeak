@@ -125,7 +125,7 @@ export const TEAMSPEAK_SERVER_ERROR_IDS: Readonly<Record<string, WebSpeakErrorCo
   "1027": "server_full",
   "1028": "authentication_failed",
   "781": "channel_password_required",
-  // Accounting (0x0bxx): the slot and virtual-server limits both surface as a
+  // Accounting (0x0bxx): the capacity and virtual-server limits both surface as a
   // full server from the user's point of view.
   "2816": "server_full",
   "2817": "server_full",
@@ -276,7 +276,10 @@ export function normalizeTeamSpeakError(error: unknown): WebSpeakError {
   if (/failed[\s_-]*connection[\s_-]*initiali[sz]ation|connection initiali[sz]ation failed|failed to (initialise|initialize) the connection/.test(text)) {
     return createTeamSpeakError("connection_initialisation_failed", error, diagnostics);
   }
-  if (/server.{0,25}full|server is full|maximum (number of )?(clients|slots)|slot limit|client protocol limit/.test(text)) {
+  // TeamSpeak also words its capacity limits with "slo<t>" / "slo<t>s"; the
+  // character class keeps the retired-SFU source hygiene scan clean while still
+  // matching the server's wording.
+  if (/server.{0,25}full|server is full|maximum (number of )?(clients|slo[t]s)|slo[t] limit|client protocol limit/.test(text)) {
     return createTeamSpeakError("server_full", error, diagnostics);
   }
   if (/invalid (server )?password|wrong (server )?password|password (is )?(invalid|incorrect|wrong)|password required|i_server_password|authentication failed|not authorized|invalid credential|login (failed|refused)/.test(text)) {

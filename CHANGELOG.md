@@ -4,22 +4,27 @@
 
 ### 中文
 
+- **BREAKING**：WebRTC 媒体引擎全量切换为 mediasoup 单引擎，旧 werift 引擎与「SFU 预分配槽位」模型彻底退役。说话人改为按 `clientId ↔ producerId ↔ consumerId` 动态发布/订阅，不再有预分配 audio m-line 与槽位上限。环境变量 `WEBSPEAK_SFU_SLOTS` 已移除；`werift` 移入 `devDependencies`（仅供无头测试替身使用）。运维发布注意：新版本不再使用 `scripts/patch-werift-ntp.mjs`，请同步删除生产 systemd unit 里的 `ExecStartPre=node scripts/patch-werift-ntp.mjs --verify` 拦截项，并确保随镜像分发 `vendor/mediasoup-worker/`。
 - 新增「频道说明」标签：作为频道页面的默认视图排在标签栏最前，进入频道即展示当前频道的说明文本，支持 TeamSpeak 说明中的加粗、斜体、下划线、删除线、颜色与链接，正文里普通的方括号保持不变；频道未填写说明时给出引导空态。说明按需通过 `channelinfo` 读取，因此在没有频道列表权限的服务器上也能正常显示。
 
 ### English
 
+- **BREAKING**: WebRTC media is now mediasoup-only; the werift engine and the pre-allocated “SFU slot” model are fully retired. Speakers are published and subscribed dynamically via `clientId ↔ producerId ↔ consumerId`, with no reserved audio m-lines and no slot ceiling. The `WEBSPEAK_SFU_SLOTS` environment variable is removed, and `werift` moved to `devDependencies` (headless test double only). Operators: the new build no longer uses `scripts/patch-werift-ntp.mjs`, so remove the `ExecStartPre=node scripts/patch-werift-ntp.mjs --verify` guard from the production systemd unit and make sure `vendor/mediasoup-worker/` ships with the image.
 - Added a “Channel description” tab: it leads the tab strip as the channel page's default view and shows the current channel's description as soon as you enter, rendering TeamSpeak's bold, italic, underline, strike-through, color, and link markup while leaving ordinary bracketed text untouched; a guiding empty state appears when the channel has no description. Descriptions are fetched on demand through `channelinfo`, so servers without channel-list permission keep working.
 
 ### Deutsch
 
+- **BREAKING**: WebRTC-Medien laufen jetzt ausschließlich über mediasoup; die werift-Engine und das Modell der vorab reservierten „SFU-Slots“ sind vollständig entfernt. Sprecher werden dynamisch über `clientId ↔ producerId ↔ consumerId` publiziert und abonniert – ohne reservierte Audio-m-Lines und ohne Slot-Obergrenze. Die Umgebungsvariable `WEBSPEAK_SFU_SLOTS` entfällt, `werift` wandert nach `devDependencies` (nur noch als Headless-Testdouble). Betriebshinweis: Der neue Build nutzt `scripts/patch-werift-ntp.mjs` nicht mehr – entfernen Sie den `ExecStartPre=node scripts/patch-werift-ntp.mjs --verify`-Eintrag aus der produktiven systemd-Unit und liefern Sie `vendor/mediasoup-worker/` mit dem Image aus.
 - Neuer Tab „Kanalbeschreibung“: Er steht als Standardansicht am Anfang der Tab-Leiste und zeigt die Beschreibung des aktuellen Kanals direkt beim Betreten; dargestellt werden Fett, Kursiv, Unterstrichen, Durchgestrichen, Farben und Links aus TeamSpeak, gewöhnliche Klammertexte bleiben unverändert, und ohne Beschreibung erscheint ein Hinweis. Die Beschreibung wird bedarfsweise über `channelinfo` geladen, sodass Server ohne Kanal-Listen-Berechtigung weiter funktionieren.
 
 ### Русский
 
+- **BREAKING**: Медиа WebRTC теперь работает только на mediasoup; движок werift и модель предварительно выделенных «SFU-слотов» полностью выведены из эксплуатации. Говорящие публикуются и подписываются динамически по `clientId ↔ producerId ↔ consumerId`, без резервирования audio m-line и без ограничения на число слотов. Переменная окружения `WEBSPEAK_SFU_SLOTS` удалена, а `werift` перенесён в `devDependencies` (только для безголового тестового двойника). Внимание при выпуске: новая сборка больше не использует `scripts/patch-werift-ntp.mjs` — удалите строку `ExecStartPre=node scripts/patch-werift-ntp.mjs --verify` из рабочего systemd-юнита и поставляйте `vendor/mediasoup-worker/` вместе с образом.
 - Добавлен раздел «Описание канала»: он открывается по умолчанию и стоит первым в панели разделов, показывая описание текущего канала сразу при входе; поддерживаются полужирный, курсив, подчёркивание, зачёркивание, цвет и ссылки TeamSpeak, при этом обычный текст в квадратных скобках не изменяется; если описания нет, выводится подсказка. Описание запрашивается по требованию через `channelinfo`, поэтому серверы без права на список каналов продолжают работать.
 
 ### 日本語
 
+- **BREAKING**: WebRTC メディアは mediasoup 単一エンジンに完全移行し、werift エンジンと「SFU スロット事前割り当て」モデルは廃止しました。話者は `clientId ↔ producerId ↔ consumerId` で動的に publish/subscribe され、audio m-line の予約やスロット上限はありません。環境変数 `WEBSPEAK_SFU_SLOTS` は削除し、`werift` は `devDependencies` へ移動（ヘッドレステスト代替のみ）。運用注意：新ビルドは `scripts/patch-werift-ntp.mjs` を使用しないため、本番 systemd unit の `ExecStartPre=node scripts/patch-werift-ntp.mjs --verify` を削除し、`vendor/mediasoup-worker/` をイメージに同梱してください。
 - 「チャンネル説明」タブを追加：タブ列の先頭に既定の表示として配置し、入室時に現在のチャンネルの説明を表示します。TeamSpeak の太字・斜体・下線・取り消し線・色・リンクを描画し、本文中の通常の角括弧はそのまま。説明がない場合は案内の空状態を表示。説明は `channelinfo` で必要なときだけ取得するため、チャンネル一覧の権限がないサーバーでも動作します。
 
 ## [0.2.4] — 2026-09-22

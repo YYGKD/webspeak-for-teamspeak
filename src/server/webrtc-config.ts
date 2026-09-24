@@ -7,20 +7,14 @@ export const WEBRTC_UDP_PORT_MIN = 1024;
 export const WEBRTC_UDP_PORT_MAX = 65535;
 
 /**
- * SFU 预分配的音频 slot 数。
+ * 浏览器 WebRTC 语音的开关与端口段配置（由管理员控制台持久化）。
  *
- * 每个 slot 是一条协商好的 audio m-line，说话人被分配到空闲 slot 上转发，
- * 因此说话人进出**不触发重协商**。取值需要 ≥ 同一频道里可能同时说话的人数；
- * slot 用尽时会淘汰最久未活跃的说话人（会被静默）。
- *
- * 可用 WEBSPEAK_SFU_SLOTS 覆盖（1-32）。
+ * S6 起媒体由 mediasoup 单引擎托管，说话人不再预分配音频 m-line，因此这里
+ * 不再有坑位数量概念；`udpPortRange` 仅保留为管理端既有设置的类型契约。
  */
-export const DEFAULT_WEBRTC_SLOT_COUNT = 8;
-
-export function resolveWebRtcSlotCount(): number {
-  const raw = process.env.WEBSPEAK_SFU_SLOTS?.trim();
-  const value = raw ? Number(raw) : DEFAULT_WEBRTC_SLOT_COUNT;
-  return Number.isInteger(value) && value >= 1 && value <= 32 ? value : DEFAULT_WEBRTC_SLOT_COUNT;
+export interface WebRtcAudioOptions {
+  enabled: boolean;
+  udpPortRange?: [number, number];
 }
 
 /**

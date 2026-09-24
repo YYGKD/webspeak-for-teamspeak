@@ -4,8 +4,13 @@ services:
     pull_policy: missing
     restart: unless-stopped
     # WebSpeak needs to reach a TeamSpeak server running on the same host.
-    # Host networking also exposes the configured WebRTC UDP range directly.
+    # Host networking also exposes the configured WebRTC UDP/TCP range directly.
     network_mode: host
+    environment:
+      # mediasoup worker binary bundled in the image (the Dockerfile already sets
+      # this; kept explicit so a custom image layout is obvious). Omit it to use
+      # the vendored binary resolved from vendor/mediasoup-worker/.
+      MEDIASOUP_WORKER_BIN: /app/vendor/mediasoup-worker/mediasoup-worker-linux-x64
     volumes:
       - webspeak-data:/data
 

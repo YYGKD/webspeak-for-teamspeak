@@ -13,3 +13,6 @@ claude.pem
 
 # 会话留档已迁至 .local/memory/，此处只留指路牌（memory/README.md）
 memory/
+
+# mediasoup POC 工作区隔离（独立依赖，不纳入主线）
+poc/

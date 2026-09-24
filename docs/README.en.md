@@ -58,10 +58,16 @@ WebRTC moves browser voice to a realtime media path and also enables desktop acc
 
 1. Sign in at `/admin` and open **Advanced settings** on the **Servers** page.
 2. While WebRTC is disabled, choose the UDP start and end ports. The default range is `40000–40099`.
-3. Allow the complete UDP range in the WebSpeak host's security group and firewall.
+3. Allow the complete `40000–40099` range for **both UDP and TCP** in the WebSpeak host's security group and firewall (TCP backs ICE-over-TCP).
 4. Enable **WebRTC** and save. New visitors will negotiate WebRTC; unsupported browsers and networks fall back to the compatibility transport.
 
 The port range is locked while WebRTC is enabled. Disable and save WebRTC before changing it, then update the firewall rules. Public deployments also need HTTPS.
+
+Media is served by the built-in **mediasoup** engine (single engine): speakers are published and subscribed dynamically via `clientId ↔ producerId ↔ consumerId`, with no reserved audio m-lines and no slot ceiling. All related environment variables are optional:
+
+- `MEDIASOUP_WORKER_BIN`: path to the mediasoup worker binary; by default the prebuilt `vendor/mediasoup-worker/` artifact shipped with the package is used and verified against its SHA256. Release packages and the Docker image already bundle it, so it normally needs no configuration.
+- `WEBSPEAK_MAX_SPEAKERS`: concurrent published speakers per session (1–64, default 32).
+- `WEBSPEAK_MEDIA_PUBLIC_HOST`: public media address for proxy/port-mapped deployments (written into the ICE candidate `announcedAddress`); omit it when the media address equals the listen address.
 
 ### Screen-share ICE candidates
 
@@ -142,7 +148,7 @@ Disable and save the relay configuration to remove the relay option from the wel
 ### 3. Dependencies and attribution
 
 - The relay service is built into WebSpeak with Node.js standard libraries; it does not use GOST, sing-box, or another proxy framework.
-- WebRTC uses [werift](https://github.com/shinyoshiaki/werift-webrtc) `0.24.4`, whose upstream project is licensed under MIT.
+- WebRTC media is carried by [mediasoup](https://mediasoup.org/) `3.27.1` (ISC license). The former werift engine is retired and kept only as a test double in development dependencies.
 - TeamSpeak protocol connectivity uses the project-maintained [EchoSixHIYA/teamspeak-js](https://github.com/EchoSixHIYA/teamspeak-js) SDK fork.
 
 ## 🧾 Changelog
@@ -180,7 +186,7 @@ docker compose pull
 docker compose up -d
 ```
 
-Open `http://<your-host>:3040` after startup. If using a reverse proxy, point it to that address. When WebRTC is enabled, allow the UDP range shown in the administration console. Data is stored in the `webspeak-data` volume.
+Open `http://<your-host>:3040` after startup. If using a reverse proxy, point it to that address. When WebRTC is enabled, allow the UDP/TCP port range shown in the administration console. Data is stored in the `webspeak-data` volume.
 
 ```bash
 docker compose ps
@@ -222,7 +228,7 @@ Building `@discordjs/opus` requires Python, Make, and a C/C++ toolchain.
 1. Open `http://<your-host>:3040/admin`.
 2. Sign in with `admin` / `admin` and immediately set a new password of at least 12 characters.
 3. Configure the TeamSpeak target and access mode under **Servers**, for example `voice.example.com#9987`.
-4. Configure HTTPS for public access; when WebRTC is enabled, allow the UDP range shown in the console.
+4. Configure HTTPS for public access; when WebRTC is enabled, allow the UDP/TCP port range shown in the console.
 
 ## ⚠️ Requirements and notes
 
@@ -232,7 +238,7 @@ Building `@discordjs/opus` requires Python, Make, and a C/C++ toolchain.
 | TeamSpeak network | The WebSpeak host must reach the target TeamSpeak server; the default voice port is `9987`. |
 | Web network | The service uses `3040/TCP`; public deployments should expose the page and WebSocket through an HTTPS reverse proxy. |
 | IPv6 | Write literal targets as `[2001:db8::1]#9987`. The host/container needs routed IPv6, IPv6 enabled in the OS and Node.js, and the relevant firewall rules. |
-| WebRTC | The default range is `40000–40099/UDP`; allow it and disable WebRTC before changing the range. |
+| WebRTC | The default range is `40000–40099` for UDP and TCP; allow it and disable WebRTC before changing the range. |
 | Remembered identity | One browser identity can hold one active remembered connection. Disable it for parallel connections or use another browser profile. |
 | Accompaniment | Desktop only and requires WebRTC. Enable audio sharing when selecting a window or tab. |
 | Data | Docker data is in `webspeak-data`; release packages and source installs use `data/`. Back up before upgrades. |

@@ -14,18 +14,26 @@ import { formatTeamSpeakTarget, teamSpeakTargetKey, type TeamSpeakTarget } from 
 import { JoinTicketStore, type JoinTicketPayload } from "./join-ticket.js";
 import { IdentityLeaseStore } from "./identity-lease.js";
 import { SessionManager, type ManagedSession, type SessionTeardownReason } from "./session-manager.js";
-import { parseClientCommand, type ClientCommand } from "./voice-protocol.js";
+import { parseClientCommand, isMediaSignalingType, type ClientCommand, type MediaTransportDirection } from "./voice-protocol.js";
 import { isRecoverable, reconnectDelayMs, reconnectWindowOpen } from "./reconnect-policy.js";
-import { WebRtcAudioSession, resolveIceServers, type WebRtcAudioOptions, type WebRtcAudioStats, type WebRtcSessionDescription } from "./webrtc-audio.js";
+import { generateTurnUserid, resolveIceServers } from "./ice-credentials.js";
 import { pingTeamSpeakSession } from "./network-probe.js";
 import type { AccelerationRelayOptions, ConfiguredAccelerationRelay } from "./acceleration-relay.js";
 import { createOpusEncoder } from "./opus-codec.js";
-import { SpeakerRegistry } from "./speaker-registry.js";
-import { resolveWebRtcSlotCount } from "./webrtc-config.js";
+import type { WebRtcAudioOptions } from "./webrtc-config.js";
+import { createMediaRouter, createMediaWebRtcTransport, getMediaWorker } from "./media-worker.js";
+import { DIRECT_TRANSPORT_MAX_SEND_MESSAGE_SIZE, SpeakerProducerMap, resolveMaxSpeakers } from "./speaker-producer-map.js";
+import type { Consumer, DirectTransport, DtlsParameters, MediaKind, Producer, Router, RtpCapabilities, RtpParameters, WebRtcTransport } from "mediasoup/types";
 import { normalizeScreenShareIceServers, parseScreenShareMessage, type ScreenShareClientMessage, type ScreenShareIceServer, type ScreenSharePeerSignal, type ScreenShareStreamDescription, type ScreenShareViewerDescription } from "./screen-share.js";
 
-const HEARTBEAT_INTERVAL_MS = 30_000;
-const AUDIO_FRAME_BYTES = 1_920;
+// 90s（原 30s）：防跨境抖动拆连，运维热补丁固化。
+const HEARTBEAT_INTERVAL_MS = 90_000;
+/**
+ * WS 兼容（降级）通道的定长 PCM 帧：20ms 单声道 48kHz s16le。
+ * S4 起 WebRTC 上行改走 mediasoup DirectTransport Consumer，但这条
+ * 二进制通道**原样保留**，作为 WebRTC 禁用/协商失败时的降级路径。
+ */
+export const AUDIO_FRAME_BYTES = 1_920;
 // A browser audio frame is 20 ms of mono 48 kHz PCM. Keep the server-side
 // WebSocket egress queue small enough that a slow browser cannot turn old
 // voice into seconds of latency. Opus frames are variable-sized, so this is
@@ -33,6 +41,220 @@ const AUDIO_FRAME_BYTES = 1_920;
 // small Opus frames; the browser also enforces a time-based playback limit
 // before scheduling decoded audio.
 const MAX_SERVER_AUDIO_BUFFERED_BYTES = 4_096;
+
+/** TS3 上行语音 codec：4 = Opus Voice（普通语音）。 */
+export const OPUS_VOICE_CODEC = 4;
+/** TS3 上行语音 codec：5 = Opus Music（伴奏，60ms 音乐帧）。 */
+export const OPUS_MUSIC_CODEC = 5;
+
+/** RTP 固定头长度（RFC 3550：V/P/X/CC + M/PT + seq + ts + ssrc）。 */
+const RTP_FIXED_HEADER_BYTES = 12;
+
+/**
+ * 从 RTP 报文中抽取载荷，安全跳过 CSRC 列表、头部扩展与 padding。
+ *
+ * S4 上行链路必须"复用 RTP 头解析安全跳过扩展头"：mediasoup 的
+ * DirectTransport Consumer 会重写序号并注入一个 16 字节头部扩展
+ * （见 speaker-producer-map-test 的实测结论），若按固定 12 字节偏移取
+ * payload 会把扩展字节当成 Opus 数据送给 TeamSpeak，造成解码爆音。
+ *
+ * 解析不出来（截断、版本非 2、扩展/padding 长度越界、空载荷）时返回 null，
+ * 由调用方按"格式无效"静默丢弃，绝不猜一个偏移量硬送。
+ */
+export function extractOpusPayload(packet: Buffer): Buffer | null {
+  if (packet.length < RTP_FIXED_HEADER_BYTES) return null;
+  if ((packet[0] as number) >> 6 !== 2) return null;
+  const csrcCount = (packet[0] as number) & 0x0f;
+  let offset = RTP_FIXED_HEADER_BYTES + csrcCount * 4;
+  if (packet.length < offset) return null;
+  // 头部扩展：X 位置位时，头 4 字节为 profile(2) + 长度(2，单位 32bit 字)。
+  if (((packet[0] as number) & 0x10) !== 0) {
+    if (packet.length < offset + 4) return null;
+    const extensionWords = packet.readUInt16BE(offset + 2);
+    offset += 4 + extensionWords * 4;
+    if (packet.length < offset) return null;
+  }
+  let end = packet.length;
+  // padding：P 位置位时，最后一字节是 padding 长度（含该字节自身）。
+  if (((packet[0] as number) & 0x20) !== 0) {
+    const paddingBytes = packet[packet.length - 1] as number;
+    if (paddingBytes === 0 || paddingBytes > end - offset) return null;
+    end -= paddingBytes;
+  }
+  if (offset >= end) return null;
+  return packet.subarray(offset, end);
+}
+
+/**
+ * 上行转发的目标抽象。
+ *
+ * `WebClientEntry` 结构上满足它（`tsClient` 提供 sendVoice/sendWhisper，
+ * whisper/mute/accompaniment 状态是同一对象的可变字段），因此管线读取的永远是
+ * **实时状态**而非快照；测试可注入一个记录调用的 Stub 目标。
+ */
+export interface UpstreamAudioTarget {
+  /** 私语是否激活（`setWhisperActive` 命令维护）。 */
+  whisperActive: boolean;
+  /** 私语目标 clientId 集合（`setWhisperTargets` 命令维护）。 */
+  whisperTargetIds: Set<number>;
+  /** 网关侧麦克风静音状态（`setMicrophoneMuted` / `mediaPauseProducer` 维护）。 */
+  microphoneMuted: boolean;
+  /** 伴奏是否激活（`setAccompanimentActive` 命令维护）。 */
+  accompanimentActive: boolean;
+  tsClient: {
+    sendVoice(payload: Buffer, codec: number): void;
+    sendWhisper(payload: Buffer, targets: number[], codec: number): void;
+  };
+}
+
+export interface UpstreamAudioPipelineOptions {
+  /** DirectTransport 的消息上限；缺省与下行链路同量级（2048）。 */
+  maxSendMessageSize?: number;
+  /** 一帧成功转发到 TS3 时回调（观测用）。 */
+  onFrameForwarded?: (codec: number, bytes: number) => void;
+  /** 一帧被丢弃时回调（观测用）。 */
+  onFrameDropped?: (reason: "muted" | "malformed") => void;
+}
+
+/**
+ * 可同步 TS3 输入静音状态的目标（`WebClientEntry` 与测试 Stub 均结构满足）。
+ */
+export interface MicrophoneMuteTarget {
+  microphoneMuted: boolean;
+  tsClient: { setInputMuted(muted: boolean): void | Promise<void> };
+}
+
+/**
+ * 应用网关侧麦克风静音状态（S4 §8.3）。
+ *
+ * 先同步 TS3 输入静音（TS3 目录里静音图标一致），再更新网关侧丢包护栏状态。
+ * `setInputMuted` 失败时抛出，由命令处理器统一 catch 转成错误帧——不静默吞。
+ */
+export async function applyMicrophoneMute(target: MicrophoneMuteTarget, muted: boolean): Promise<void> {
+  await target.tsClient.setInputMuted(muted);
+  target.microphoneMuted = muted;
+}
+
+/**
+ * S4 上行链路：浏览器上行 Producer → DirectTransport Consumer → TSClient。
+ *
+ * 每个上行 Producer 一条管线、一条 DirectTransport。`attach()` 订阅该 Producer
+ * 并**显式 `consumer.resume()`**；`consumer.on('rtp')` 抽出的 Opus payload 按
+ * 零退化矩阵分流：
+ *
+ *   ① whisper：`whisperActive && whisperTargetIds.size > 0` → `sendWhisper(..., 4)`；
+ *      否则 → `sendVoice(..., codec)`；
+ *   ② accompaniment：`accompanimentActive` 决定 codec（true → 5 Opus Music，false → 4）；
+ *   ③ mute 护栏：`microphoneMuted` 期间收到上行包一律静默丢弃（防御浏览器异常）。
+ *
+ * 设计上把"决策"与"资源"都收进这个类，便于用 Stub 目标做零网络单测；
+ * 生产侧由 `VoiceBridge.attachUpstreamPipeline()` 接线。
+ */
+export class UpstreamAudioPipeline {
+  private transport: DirectTransport | null = null;
+  private consumer: Consumer | null = null;
+  private closed = false;
+
+  constructor(
+    private readonly target: UpstreamAudioTarget,
+    private readonly options: UpstreamAudioPipelineOptions = {},
+  ) {}
+
+  /** 是否已订阅到上行 Producer。 */
+  get attached(): boolean {
+    return this.consumer !== null;
+  }
+
+  /** 当前 Consumer id（未订阅时为 undefined）。 */
+  get consumerId(): string | undefined {
+    return this.consumer?.id;
+  }
+
+  /**
+   * 在 Router 上创建 DirectTransport Consumer 订阅该上行 Producer 并显式 resume。
+   *
+   * 创建失败（Producer 不存在 / Router 已关闭）时清理半成品并抛出，由信令层
+   * 转成 mediaError —— 不静默吞掉，否则浏览器会一直等不到 `mediaProduced` 回执。
+   */
+  async attach(router: Router, producerId: string): Promise<void> {
+    if (this.closed) throw new Error("upstream pipeline is closed");
+    if (this.consumer) return;
+    const transport = await router.createDirectTransport({
+      maxSendMessageSize: this.options.maxSendMessageSize ?? DIRECT_TRANSPORT_MAX_SEND_MESSAGE_SIZE,
+      appData: { direction: "upstream" },
+    });
+    try {
+      const consumer = await transport.consume({
+        producerId,
+        rtpCapabilities: router.rtpCapabilities,
+        appData: { direction: "upstream" },
+      });
+      consumer.on("rtp", (packet: Buffer) => this.handleRtpPacket(packet));
+      consumer.on("producerclose", () => this.close());
+      consumer.on("transportclose", () => { this.consumer = null; });
+      // Consumer 默认未暂停，这里显式 resume 声明"立即开始收包"，与验收口径一致。
+      await consumer.resume();
+      this.transport = transport;
+      this.consumer = consumer;
+    } catch (error: unknown) {
+      try { transport.close(); } catch { /* 幂等 */ }
+      throw error;
+    }
+  }
+
+  /** 处理一个来自上行 Producer 的 RTP 报文（Consumer 'rtp' 事件的入口）。 */
+  handleRtpPacket(packet: Buffer): void {
+    if (this.closed) return;
+    // ③ 静音护栏：muted 期间的上行包一律丢弃，绝不透传到 TS3。
+    if (this.target.microphoneMuted) {
+      this.options.onFrameDropped?.("muted");
+      return;
+    }
+    const extracted = extractOpusPayload(packet);
+    if (!extracted || extracted.length === 0) {
+      this.options.onFrameDropped?.("malformed");
+      return;
+    }
+    // mediasoup 的 rtp 事件 Buffer 由事件循环复用，转发前拷一份自有内存。
+    this.forwardOpusPayload(Buffer.from(extracted));
+  }
+
+  /** 抽取后的 Opus payload 按零退化矩阵分流到 TS3。 */
+  forwardOpusPayload(payload: Buffer): void {
+    if (this.closed) return;
+    // ③ 静音护栏（防御性重复拦截）：无论从 handleRtpPacket 还是直接调用进入，
+    // muted 期间都不得透传。两道拦截保证任何一个入口都不会漏。
+    if (this.target.microphoneMuted) {
+      this.options.onFrameDropped?.("muted");
+      return;
+    }
+    // ② 伴奏决定 codec：5 = Opus Music，4 = Opus Voice。
+    const codec = this.target.accompanimentActive ? OPUS_MUSIC_CODEC : OPUS_VOICE_CODEC;
+    if (this.target.whisperActive && this.target.whisperTargetIds.size > 0) {
+      // ① 私语命中：仅目标成员收到，沿用既有 codec 4 约定。
+      this.target.tsClient.sendWhisper(payload, [...this.target.whisperTargetIds], OPUS_VOICE_CODEC);
+    } else {
+      this.target.tsClient.sendVoice(payload, codec);
+    }
+    this.options.onFrameForwarded?.(codec, payload.length);
+  }
+
+  /** 释放 Consumer 与 DirectTransport（幂等）。 */
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    const consumer = this.consumer;
+    this.consumer = null;
+    if (consumer) {
+      try { consumer.close(); } catch { /* 幂等 */ }
+    }
+    const transport = this.transport;
+    this.transport = null;
+    if (transport) {
+      try { transport.close(); } catch { /* 幂等 */ }
+    }
+  }
+}
 
 function publicFailureDetail(error: ReturnType<typeof normalizeTeamSpeakError>): string | undefined {
   const serverMessage = error.diagnostics.serverMessage?.trim();
@@ -89,14 +311,6 @@ export interface AudioFlowStats {
   egressSentMaxGapMs: number;
   egressPeakBufferedBytes: number;
   egressFramesByClient: Record<string, number>;
-  webrtcIngressRtpFrames: number;
-  webrtcIngressRtpFirstAt: number | null;
-  webrtcIngressRtpLastAt: number | null;
-  webrtcIngressRtpMaxGapMs: number;
-  webrtcEgressRtpFrames: number;
-  webrtcEgressRtpFirstAt: number | null;
-  webrtcEgressRtpLastAt: number | null;
-  webrtcEgressRtpMaxGapMs: number;
 }
 
 interface ChannelMember {
@@ -116,6 +330,30 @@ interface ServerEvent {
   kind: "joined" | "left" | "moved" | "poke" | "connection";
   message: string;
   timestamp: number;
+}
+
+/**
+ * 一个浏览器会话的 mediasoup 媒体图。
+ *
+ * - `sendTransport`：浏览器上行（浏览器 produce → 服务端 consume → TS3，S4 接线）
+ * - `recvTransport`：浏览器下行（TS3 说话人 → DirectTransport produce → 浏览器 consume）
+ * - `speakerProducers`：说话人 → DirectTransport Producer 的动态映射（S3 核心）
+ *
+ * 每个会话一个 Router：说话人集合与订阅关系都是会话私有的，共享 Router 会让
+ * 一个会话的 Producer 泄漏到另一个会话的 `rtpCapabilities` 视图里。
+ */
+interface MediaSession {
+  router: Router;
+  sendTransport: WebRtcTransport | null;
+  recvTransport: WebRtcTransport | null;
+  /** 浏览器上行 Producer：producerId → Producer。 */
+  producers: Map<string, Producer>;
+  /** 浏览器下行 Consumer：consumerId → Consumer。 */
+  consumers: Map<string, Consumer>;
+  /** 说话人下行发布器。 */
+  speakerProducers: SpeakerProducerMap;
+  /** 浏览器上行 Producer → 上行转发管线（producerId → pipeline，S4 核心）。 */
+  upstreams: Map<string, UpstreamAudioPipeline>;
 }
 
 interface WebClientEntry {
@@ -139,14 +377,23 @@ interface WebClientEntry {
   opusEncoderWarnedAt: number; // Opus 编码器不可用告警的时间戳，用于限流避免反复刷屏
   whisperTargetIds: Set<number>;
   whisperActive: boolean;
+  /**
+   * S4 网关侧麦克风静音状态。与 TS3 `client_input_muted` 同步，同时作为上行
+   * Consumer 的丢包护栏：muted 期间到达的上行 RTP 包一律静默丢弃。
+   */
+  microphoneMuted: boolean;
+  /** S4 伴奏状态：决定上行转发的 TS3 codec（true → 5 Opus Music，false → 4）。 */
+  accompanimentActive: boolean;
   isAlive: boolean;
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   audio: AudioFlowStats;
-  webrtc: WebRtcAudioSession | null;
-  /** SFU：说话人 → slot 的分配器与 RTP 生成器（仅 WebRTC 路径使用）。 */
-  registry: SpeakerRegistry;
-  /** 已下发给浏览器的 slot → clientId 映射，用于检测归属变化。 */
-  slotOwner: Map<number, number>;
+  /**
+   * S3 mediasoup 媒体会话：浏览器发出 `mediaGetRtpCapabilities` 时惰性建立。
+   * 为 null 表示该会话尚未启用 WebRTC 媒体（此时走 WS 兼容通道）。
+   */
+  media: MediaSession | null;
+  /** 媒体会话创建在途（并发信令共享同一次创建）。 */
+  mediaPending: Promise<MediaSession> | null;
   lastLatencyProbeAt: number;
   /** 最近一次用 clientinfo 补齐成员状态的时间（按 clid），用于限速与去重。 */
   clientStateRefreshedAt: Map<number, number>;
@@ -291,12 +538,13 @@ export class VoiceBridge {
         opusEncoderWarnedAt: 0,
         whisperTargetIds: new Set(),
         whisperActive: false,
+        microphoneMuted: false,
+        accompanimentActive: false,
         isAlive: true,
         reconnectTimer: null,
         audio: createAudioFlowStats(),
-        webrtc: null,
-        registry: new SpeakerRegistry(resolveWebRtcSlotCount()),
-        slotOwner: new Map(),
+        media: null,
+        mediaPending: null,
         lastLatencyProbeAt: 0,
         clientStateRefreshedAt: new Map(),
         clientStateSweepTimer: null,
@@ -601,8 +849,8 @@ export class VoiceBridge {
           whisperTargetIds: [...entry!.whisperTargetIds],
           whisperActive: entry!.whisperActive,
           webrtcAvailable: this.getWebRtcOptions()?.enabled === true,
-          // SFU 的 slot 数必须与浏览器一致，否则 offer 的 m-line 数量对不上。
-          webrtcSlotCount: resolveWebRtcSlotCount(),
+          // S3 起废除预分配坑位：说话人按 clientId ↔ producerId 动态发布订阅，
+          // 浏览器不再需要知道"服务端开了几条 m-line"。字段已彻底移除。
           screenShareIceServers: this.getScreenShareIceServers(),
           accelerated: Boolean(entry!.acceleration),
           ...(entry!.rememberIdentity ? { identity: tsClient.getIdentityString() } : {}),
@@ -624,6 +872,8 @@ export class VoiceBridge {
         entry!.members.clear();
         entry!.whisperTargetIds.clear();
         entry!.whisperActive = false;
+        // S3：重连后旧说话人 Producer 全部失效，清空并广播 speakerProducerClosed。
+        entry?.media?.speakerProducers.clear();
       };
 
       const failReconnect = (normalized: ReturnType<typeof normalizeTeamSpeakError>) => {
@@ -762,9 +1012,8 @@ export class VoiceBridge {
         this.reconcileNativeScreenShareAfterClientLeave(entry!, info.id);
         const wasKnown = entry!.members.has(info.id);
         const leavingMember = entry!.members.get(info.id);
-        // SFU：成员离开就回收其 slot，并让浏览器更新 slot → 成员的映射。
-        entry!.registry.release(info.id);
-        syncWebRtcSlots();
+        // S3：回收该说话人的下行 Producer，浏览器据此淡出并释放 Consumer。
+        entry!.media?.speakerProducers.remove(info.id, "closed");
         directory.applyClientLeave(info.id);
         refreshDirectory();
         if (tsReady && initialStateSent && wasKnown) {
@@ -793,40 +1042,7 @@ export class VoiceBridge {
         if (tsReady && initialStateSent) sendJson({ type: "channelList", channels: entry!.channelTree });
       });
 
-      /**
-       * SFU：把 registry 的 slot 归属同步到 sender 与浏览器。
-       *
-       * 只在归属**真正变化**时重定位序号并下发新映射 —— 对未换源的 sender
-       * 调用 replaceRTP 会让它把上一个序号再发一次。
-       */
-      const syncWebRtcSlots = (): void => {
-        const current = entry;
-        const webRtc = current?.webrtc;
-        if (!current || !webRtc) return;
-        const snapshot = current.registry.snapshot();
-        let changed = false;
-        const seen = new Set<number>();
-        for (const [slotText, clientId] of Object.entries(snapshot)) {
-          const slot = Number(slotText);
-          seen.add(slot);
-          if (current.slotOwner.get(slot) === clientId) continue;
-          current.slotOwner.set(slot, clientId);
-          const stream = current.registry.streamOf(clientId);
-          if (stream) webRtc.assignSlot(slot, stream);
-          changed = true;
-        }
-        for (const slot of [...current.slotOwner.keys()]) {
-          if (seen.has(slot)) continue;
-          current.slotOwner.delete(slot);
-          changed = true;
-        }
-        if (!changed) return;
-        webRtc.setSlotStats(current.registry.size);
-        sendJson({ type: "speakerMap", slots: snapshot });
-      };
-
-      // v0.2.4：原生 TS6 屏幕共享的通知入口。与上面的 slot 同步互不相干，
-      // 只是恰好插在同一个位置，两个都保留。
+      // v0.2.4：原生 TS6 屏幕共享的通知入口。
       tsClient.on("rawNotification", (notification: TSRawNotification) => {
         this.handleRawScreenNotification(entry!, notification);
       });
@@ -838,23 +1054,18 @@ export class VoiceBridge {
         entry!.audio.tsReceiveLastAt = receivedAt;
         entry!.audio.tsReceiveFrames++;
         if (ws.readyState !== WebSocket.OPEN || data.clientId === selfId) return;
-        const webRtc = entry!.webrtc;
         const now = receivedAt;
         if (entry!.audio.egressLastAt !== null) entry!.audio.egressMaxGapMs = Math.max(entry!.audio.egressMaxGapMs, now - entry!.audio.egressLastAt);
         entry!.audio.egressFirstAt ??= now;
         entry!.audio.egressLastAt = now;
         const sourceKey = String(data.clientId);
         entry!.audio.egressFramesByClient[sourceKey] = (entry!.audio.egressFramesByClient[sourceKey] ?? 0) + 1;
-        // A negotiated WebRTC session owns the browser's realtime audio
-        // egress. Do not also send the same TeamSpeak packet over the
-        // reliable WebSocket, otherwise the browser plays two copies and
-        // the TCP path can still accumulate stale audio behind the peer.
-        if (webRtc) {
-          // SFU：一帧只打一次 RTP，再交给该说话人所在 slot 的 sender 转发。
-          // 编解码全部在两端完成，这里没有采样级处理。
-          const result = entry!.registry.ingest(data.clientId, data.data);
-          syncWebRtcSlots();
-          if (result) webRtc.forward(result.slot, result.rtp);
+        // S3 mediasoup 下行：每个说话人一条 DirectTransport Producer，按
+        // clientId 动态发布；浏览器收到 newSpeakerProducer 后自行 consume。
+        // 首帧在 ingest() 内部等资源创建完成再注入 Router，首帧不丢。
+        const media = entry!.media;
+        if (media) {
+          void media.speakerProducers.ingest(data.clientId, data.data);
           entry!.audio.egressFrames++;
           return;
         }
@@ -979,29 +1190,11 @@ export class VoiceBridge {
         }
 
         const rawMessage = typeof data === "string" ? data : data.toString("utf-8");
-        const webRtcOffer = parseWebRtcOffer(rawMessage);
-        if (webRtcOffer) {
-          if (this.getWebRtcOptions()?.enabled !== true) {
-            sendProtocolError(sendJson, "WEBRTC_DISABLED", "WebRTC 音频传输未启用");
-            return;
-          }
-          if (!tsReady || session.state !== "connected") {
-            sendProtocolError(sendJson, "SESSION_NOT_READY", "TeamSpeak 会话尚未就绪");
-            return;
-          }
-          void this.handleWebRtcOffer(entry!, webRtcOffer, sendJson);
-          return;
-        }
-        if (isWebRtcStopMessage(rawMessage)) {
-          const webRtc = entry!.webrtc;
-          entry!.webrtc = null;
-          if (webRtc) {
-            void webRtc.close()
-              .then(() => Object.assign(entry!.audio, webRtc.getStats()))
-              .catch(() => undefined);
-          }
-          return;
-        }
+        // S6 起服务端不再维护浏览器 WebRTC 对端会话（媒体统一由 mediasoup
+        // DirectTransport 承载）。`webrtcStop` 是旧客户端在回退到兼容通道时
+        // 仍会发送的遗留信令：这里静默忽略，避免把它当成未知消息回一个错误帧
+        // （否则每次回退都会在界面上弹一次报错）。
+        if (isLegacyWebRtcStopMessage(rawMessage)) return;
         const screenShareMessage = parseScreenShareMessage(rawMessage);
         if (screenShareMessage) {
           if ("error" in screenShareMessage) {
@@ -1018,6 +1211,12 @@ export class VoiceBridge {
         const command = parseClientCommand(rawMessage);
         if ("error" in command) {
           sendProtocolError(sendJson, command.error.code, command.error.message);
+          return;
+        }
+        // 媒体信令不依赖 TeamSpeak 会话就绪：浏览器可以在 TS 连接完成前先把
+        // Device 载入、把 transport 建起来，这样首次开口时不用再等握手。
+        if (isMediaSignalingType(command.type)) {
+          void this.handleMediaMessage(entry!, command, sendJson);
           return;
         }
         if (!tsReady || session.state !== "connected") {
@@ -1138,12 +1337,10 @@ export class VoiceBridge {
     entry.clientStateRefreshedAt.clear();
     entry.avatarFlagByUid.clear();
     entry.opusEncoder = null;
-    const webRtc = entry.webrtc;
-    entry.webrtc = null;
-    if (webRtc) {
-      try { await webRtc.close(); } catch { /* peer teardown is idempotent */ }
-      Object.assign(entry.audio, webRtc.getStats());
-    }
+    const media = entry.media;
+    entry.media = null;
+    entry.mediaPending = null;
+    if (media) this.closeMediaSession(media);
     entry.whisperTargetIds.clear();
     entry.whisperActive = false;
     entry.channelTree = [];
@@ -1207,7 +1404,8 @@ export class VoiceBridge {
   private getScreenShareIceServers(): ScreenShareIceServer[] {
     const configured = this.options.screenShareIceServers;
     const servers = typeof configured === "function" ? configured() : configured;
-    return normalizeScreenShareIceServers(servers ?? resolveIceServers());
+    // 屏幕共享（scr）：调用 generateTurnUserid() 独立生成合规的 12 位纯十六进制 userid，独享配额
+    return normalizeScreenShareIceServers(servers ?? resolveIceServers(generateTurnUserid()));
   }
 
   private getAccelerationOptions(relayId = ""): ConfiguredAccelerationRelay | undefined {
@@ -1217,6 +1415,264 @@ export class VoiceBridge {
     const selected = relayId ? relays.find((relay) => relay.id === relayId) : relays[0];
     if (!selected) return undefined;
     return selected;
+  }
+
+  /**
+   * 惰性建立该会话的 mediasoup 媒体图。
+   *
+   * Router 从进程内唯一 Worker 派生。Worker 拉起失败（二进制缺失 / sha256 校验
+   * 不过）会抛出，由 handleMediaMessage 转成 mediaError 帧 —— 不静默降级，否则
+   * 浏览器会一直等一个永远不会来的 answer。
+   */
+  private async ensureMediaSession(
+    entry: WebClientEntry,
+    sendJson: (message: Record<string, unknown>) => void,
+  ): Promise<MediaSession> {
+    if (entry.media) return entry.media;
+    if (entry.mediaPending) return entry.mediaPending;
+    const pending = (async (): Promise<MediaSession> => {
+      const worker = await getMediaWorker({ logger: this.logger });
+      const router = await createMediaRouter(worker);
+      const session: MediaSession = {
+        router,
+        sendTransport: null,
+        recvTransport: null,
+        producers: new Map(),
+        consumers: new Map(),
+        upstreams: new Map(),
+        speakerProducers: new SpeakerProducerMap(router, {
+          maxSpeakers: resolveMaxSpeakers(),
+          onNewSpeakerProducer: (clientId, producerId) => sendJson({ type: "newSpeakerProducer", clientId, producerId }),
+          onSpeakerProducerClosed: (clientId, producerId, reason) => sendJson({ type: "speakerProducerClosed", clientId, producerId, reason }),
+        }),
+      };
+      entry.media = session;
+      return session;
+    })();
+    entry.mediaPending = pending;
+    try {
+      return await pending;
+    } finally {
+      if (entry.mediaPending === pending) entry.mediaPending = null;
+    }
+  }
+
+  /**
+   * mediasoup 媒体信令分发。
+   *
+   * 只做协议搬运：RTP 参数、DTLS 参数、能力集都原样透传给 mediasoup 校验，
+   * 网关不复制一份 ORTC 规则（两份真相必然漂移）。
+   */
+  private async handleMediaMessage(
+    entry: WebClientEntry,
+    command: ClientCommand,
+    sendJson: (message: Record<string, unknown>) => void,
+  ): Promise<void> {
+    try {
+      const session = await this.ensureMediaSession(entry, sendJson);
+      switch (command.type) {
+        case "mediaGetRtpCapabilities": {
+          sendJson({ type: "mediaRtpCapabilities", requestId: command.requestId, rtpCapabilities: session.router.rtpCapabilities });
+          return;
+        }
+        case "mediaCreateTransport": {
+          const direction = command.payload.direction as MediaTransportDirection;
+          const transport = await createMediaWebRtcTransport(session.router, {
+            ...(entry.webrtcPublicHost ? { announcedAddress: entry.webrtcPublicHost } : {}),
+            appData: { direction },
+          });
+          if (direction === "send") session.sendTransport = transport;
+          else session.recvTransport = transport;
+          transport.on("dtlsstatechange", (state) => {
+            if (state === "failed" || state === "closed") {
+              this.logger.warn({ entryId: entry.id, transportId: transport.id, direction, state }, "mediasoup transport DTLS 状态异常");
+            }
+          });
+          sendJson({
+            type: "mediaTransportCreated",
+            requestId: command.requestId,
+            direction,
+            transportId: transport.id,
+            iceParameters: transport.iceParameters,
+            iceCandidates: transport.iceCandidates,
+            dtlsParameters: transport.dtlsParameters,
+            ...(transport.sctpParameters ? { sctpParameters: transport.sctpParameters } : {}),
+          });
+          return;
+        }
+        case "mediaConnectTransport": {
+          const transport = findMediaTransport(session, command.payload.transportId as string);
+          if (!transport) {
+            sendMediaError(sendJson, command.requestId, "MEDIA_TRANSPORT_NOT_FOUND", "媒体传输不存在或已关闭");
+            return;
+          }
+          await transport.connect({ dtlsParameters: command.payload.dtlsParameters as DtlsParameters });
+          sendJson({ type: "mediaTransportConnected", requestId: command.requestId, transportId: transport.id });
+          return;
+        }
+        case "mediaProduce": {
+          const transport = findMediaTransport(session, command.payload.transportId as string);
+          if (!transport) {
+            sendMediaError(sendJson, command.requestId, "MEDIA_TRANSPORT_NOT_FOUND", "媒体传输不存在或已关闭");
+            return;
+          }
+          // 浏览器在 appData 里携带初始 muted / accompanimentActive（替代旧 offer
+          // 内字段），作为网关侧状态初值；后续由 setMicrophoneMuted /
+          // setAccompanimentActive 命令热更新。
+          const produceAppData = command.payload.appData as Record<string, unknown> | undefined;
+          if (produceAppData) {
+            if (typeof produceAppData.muted === "boolean") entry.microphoneMuted = produceAppData.muted;
+            if (typeof produceAppData.accompanimentActive === "boolean") entry.accompanimentActive = produceAppData.accompanimentActive;
+          }
+          const producer = await transport.produce({
+            kind: (command.payload.kind as MediaKind | undefined) ?? "audio",
+            rtpParameters: command.payload.rtpParameters as RtpParameters,
+            ...(command.payload.appData ? { appData: command.payload.appData as Record<string, unknown> } : {}),
+          });
+          session.producers.set(producer.id, producer);
+          producer.on("transportclose", () => { session.producers.delete(producer.id); });
+          // S4：在 Router 上建立 DirectTransport Consumer 订阅该上行 Producer 并 resume，
+          // 抽出的 Opus payload 按零退化矩阵透传 TSClient。
+          await this.attachUpstreamPipeline(entry, session, producer);
+          sendJson({ type: "mediaProduced", requestId: command.requestId, producerId: producer.id });
+          return;
+        }
+        case "mediaConsume": {
+          const transport = findMediaTransport(session, command.payload.transportId as string);
+          if (!transport) {
+            sendMediaError(sendJson, command.requestId, "MEDIA_TRANSPORT_NOT_FOUND", "媒体传输不存在或已关闭");
+            return;
+          }
+          const consumer = await transport.consume({
+            producerId: command.payload.producerId as string,
+            rtpCapabilities: command.payload.rtpCapabilities as RtpCapabilities,
+          });
+          session.consumers.set(consumer.id, consumer);
+          // 说话人 Producer 关闭（idle/淘汰/离开）时 mediasoup 会自动关掉对应的
+          // Consumer 并发 producerclose，这里只需把索引清掉。
+          consumer.on("producerclose", () => { session.consumers.delete(consumer.id); });
+          consumer.on("transportclose", () => { session.consumers.delete(consumer.id); });
+          sendJson({
+            type: "mediaConsumed",
+            requestId: command.requestId,
+            consumerId: consumer.id,
+            producerId: consumer.producerId,
+            kind: consumer.kind,
+            rtpParameters: consumer.rtpParameters,
+          });
+          return;
+        }
+        case "mediaPauseProducer": {
+          const producer = session.producers.get(command.payload.producerId as string);
+          if (!producer) {
+            sendMediaError(sendJson, command.requestId, "MEDIA_PRODUCER_NOT_FOUND", "上行生产者不存在或已关闭");
+            return;
+          }
+          await producer.pause();
+          // §8.3：媒体暂停等价于"网关侧静音"，同步 TS3 输入静音状态并开启丢包护栏。
+          entry.microphoneMuted = true;
+          await this.syncTeamSpeakInputMuted(entry, true);
+          sendJson({ type: "mediaProducerPaused", requestId: command.requestId, producerId: producer.id });
+          return;
+        }
+        case "mediaResumeProducer": {
+          const producer = session.producers.get(command.payload.producerId as string);
+          if (!producer) {
+            sendMediaError(sendJson, command.requestId, "MEDIA_PRODUCER_NOT_FOUND", "上行生产者不存在或已关闭");
+            return;
+          }
+          await producer.resume();
+          entry.microphoneMuted = false;
+          await this.syncTeamSpeakInputMuted(entry, false);
+          sendJson({ type: "mediaProducerResumed", requestId: command.requestId, producerId: producer.id });
+          return;
+        }
+        case "mediaConsumerResume": {
+          const consumer = session.consumers.get(command.payload.consumerId as string);
+          if (!consumer) {
+            sendMediaError(sendJson, command.requestId, "MEDIA_CONSUMER_NOT_FOUND", "下行消费者不存在或已关闭");
+            return;
+          }
+          // 浏览器自动播放策略会拦截未经用户手势的音频；解锁后由客户端显式 resume。
+          await consumer.resume();
+          sendJson({ type: "mediaConsumerResumed", requestId: command.requestId, consumerId: consumer.id });
+          return;
+        }
+        default:
+          return;
+      }
+    } catch (error: unknown) {
+      const detail = error instanceof Error ? error.message : String(error);
+      this.logger.warn({ entryId: entry.id, type: command.type, err: detail }, "mediasoup 信令处理失败");
+      sendMediaError(sendJson, command.requestId, "MEDIA_SIGNALING_FAILED", detail.slice(0, 160) || "媒体信令处理失败");
+    }
+  }
+
+  /**
+   * 为一个上行 Producer 建立转发管线（S4）。
+   *
+   * 失败时清理半成品并抛出，由 `handleMediaMessage` 的 catch 转成 mediaError：
+   * 浏览器据此知道上行链路没起来，而不是以为在正常推流。
+   */
+  private async attachUpstreamPipeline(entry: WebClientEntry, session: MediaSession, producer: Producer): Promise<void> {
+    const pipeline = new UpstreamAudioPipeline(entry, {
+      onFrameDropped: (reason) => {
+        if (reason === "malformed") this.logger.debug({ producerId: producer.id }, "上行 RTP 帧格式无效，已丢弃");
+      },
+    });
+    try {
+      await pipeline.attach(session.router, producer.id);
+    } catch (error: unknown) {
+      pipeline.close();
+      throw error;
+    }
+    session.upstreams.set(producer.id, pipeline);
+    const dispose = (): void => {
+      if (session.upstreams.get(producer.id) === pipeline) session.upstreams.delete(producer.id);
+      pipeline.close();
+    };
+    producer.on("transportclose", dispose);
+    producer.on("@close", dispose);
+  }
+
+  /**
+   * 同步 TS3 输入静音状态（best-effort）。
+   *
+   * 媒体信令不要求 TS 会话已就绪，`mediaPauseProducer` 可能在 TS 未连上时到达，
+   * 此时 `setInputMuted` 会抛错——静音护栏本身已由 `entry.microphoneMuted` 生效，
+   * 不应让同步失败反过来打断信令。
+   */
+  private async syncTeamSpeakInputMuted(entry: WebClientEntry, muted: boolean): Promise<void> {
+    try {
+      await entry.tsClient.setInputMuted(muted);
+    } catch (error: unknown) {
+      this.logger.warn(
+        { entryId: entry.id, muted, err: error instanceof Error ? error.message : String(error) },
+        "无法同步 TS3 输入静音状态（媒体信令不受影响）",
+      );
+    }
+  }
+
+  /** 释放一个会话的全部 mediasoup 资源（先发布器/消费者，再 transport，最后 Router）。 */
+  private closeMediaSession(session: MediaSession): void {
+    try { session.speakerProducers.clear(); } catch { /* 幂等 */ }
+    for (const pipeline of session.upstreams.values()) {
+      try { pipeline.close(); } catch { /* 幂等 */ }
+    }
+    session.upstreams.clear();
+    for (const consumer of session.consumers.values()) {
+      try { consumer.close(); } catch { /* 幂等 */ }
+    }
+    session.consumers.clear();
+    for (const producer of session.producers.values()) {
+      try { producer.close(); } catch { /* 幂等 */ }
+    }
+    session.producers.clear();
+    try { session.sendTransport?.close(); } catch { /* 幂等 */ }
+    try { session.recvTransport?.close(); } catch { /* 幂等 */ }
+    session.sendTransport = null;
+    session.recvTransport = null;
+    try { session.router.close(); } catch { /* 幂等 */ }
   }
 
   private handleScreenShareMessage(
@@ -1811,74 +2267,6 @@ export class VoiceBridge {
       this.sendToEntry(entry.id, { type: "screenShareSignal", streamId, fromPeerId: stream.ownerPeerId, signal });
     }
   }
-
-  private async handleWebRtcOffer(
-    entry: WebClientEntry,
-    offer: WebRtcSessionDescription,
-    sendJson: (message: Record<string, unknown>) => void,
-  ): Promise<void> {
-    if (entry.webrtc) {
-      const previousWebRtc = entry.webrtc;
-      try { await previousWebRtc.close(); } catch { /* replace a retried offer */ }
-      Object.assign(entry.audio, previousWebRtc.getStats());
-      entry.webrtc = null;
-    }
-    const config = this.getWebRtcOptions();
-    if (!config?.enabled) return;
-    // v0.2.4：把 offer 里带的初始静音状态同步到 TS 客户端（浏览器本地静音时，
-    // 其他 TS 成员只能通过网关自己的 TS 客户端状态看到）。
-    const muted = offer.muted === true;
-    try {
-      await entry.tsClient.setInputMuted(muted);
-    } catch (error: unknown) {
-      this.logger.warn({ entryId: entry.id, muted, err: error instanceof Error ? error.message : String(error) }, "Could not synchronize initial microphone mute state");
-    }
-    // SFU：slot 数在协商时一次性谈好，之后只换归属、不重协商。
-    const slotCount = config.slotCount ?? resolveWebRtcSlotCount();
-    const peer = new WebRtcAudioSession({
-      connectionId: entry.id,
-      ...(entry.webrtcPublicHost ? { publicHost: entry.webrtcPublicHost } : {}),
-      udpPortRange: config.udpPortRange,
-      slotCount,
-      logger: this.logger,
-      microphoneMuted: muted,
-      accompanimentActive: offer.accompanimentActive === true,
-      onVoiceFrame: (data, codec) => {
-        const now = Date.now();
-        if (entry.audio.ingressLastAt !== null) entry.audio.ingressMaxGapMs = Math.max(entry.audio.ingressMaxGapMs, now - entry.audio.ingressLastAt);
-        entry.audio.ingressFirstAt ??= now;
-        entry.audio.ingressLastAt = now;
-        entry.audio.ingressFrames++;
-        try {
-          if (entry.whisperActive && entry.whisperTargetIds.size) entry.tsClient.sendWhisper(data, [...entry.whisperTargetIds], codec);
-          else entry.tsClient.sendVoice(data, codec);
-          const sentAt = Date.now();
-          if (entry.audio.tsSendLastAt !== null) entry.audio.tsSendMaxGapMs = Math.max(entry.audio.tsSendMaxGapMs, sentAt - entry.audio.tsSendLastAt);
-          entry.audio.tsSendFirstAt ??= sentAt;
-          entry.audio.tsSendLastAt = sentAt;
-          entry.audio.tsSendFrames++;
-        } catch {
-          entry.audio.tsSendErrors++;
-          // A packet arriving while the TeamSpeak session is being replaced
-          // is discarded; the WebRTC peer remains independently closable.
-        }
-      },
-    });
-    entry.webrtc = peer;
-    // 会话替换时重置 slot 归属，避免把上一个 peer 的映射带过来。
-    entry.slotOwner.clear();
-    try {
-      const answer = await peer.createAnswer({ type: offer.type, sdp: offer.sdp });
-      if (entry.webrtc !== peer || entry.ws.readyState !== WebSocket.OPEN) return;
-      sendJson({ type: "webrtcAnswer", payload: { sdp: answer } });
-      this.logger.info({ entryId: entry.id }, "WebRTC audio negotiation completed");
-    } catch (error: unknown) {
-      if (entry.webrtc === peer) entry.webrtc = null;
-      try { await peer.close(); } catch { /* best effort */ }
-      this.logger.warn({ entryId: entry.id, err: error instanceof Error ? error.message : String(error) }, "WebRTC audio negotiation failed");
-      if (entry.ws.readyState === WebSocket.OPEN) sendJson({ type: "webrtcError", code: "WEBRTC_NEGOTIATION_FAILED" });
-    }
-  }
 }
 
 function resolveWebRtcPublicHost(request: IncomingMessage): string | undefined {
@@ -1939,6 +2327,22 @@ function normalizeWebRtcHost(value: string | undefined): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** 按 transportId 在会话的 send/recv transport 里查找。 */
+function findMediaTransport(session: MediaSession, transportId: string): WebRtcTransport | null {
+  if (session.sendTransport?.id === transportId) return session.sendTransport;
+  if (session.recvTransport?.id === transportId) return session.recvTransport;
+  return null;
+}
+
+function sendMediaError(
+  sendJson: (message: Record<string, unknown>) => void,
+  requestId: string | undefined,
+  code: string,
+  message: string,
+): void {
+  sendJson({ type: "mediaError", requestId, code, message });
 }
 
 async function handleCommand(
@@ -2077,13 +2481,19 @@ async function handleCommand(
       sendJson({ type: "whisperTargets", targetIds: [...entry.whisperTargetIds], active: entry.whisperActive });
     } else if (command.type === "setMicrophoneMuted") {
       const muted = command.payload.muted as boolean;
-      await entry.tsClient.setInputMuted(muted);
-      entry.webrtc?.setMicrophoneMuted(muted);
+      // S4：同步 TS3 输入静音状态，并驱动上行 Consumer 的丢包护栏。
+      await applyMicrophoneMute(entry, muted);
     } else if (command.type === "setAccompanimentActive") {
-      entry.webrtc?.setAccompanimentActive(command.payload.active as boolean);
+      const active = command.payload.active as boolean;
+      // S4：伴奏状态热更新——决定后续上行帧的 TS3 codec（5 Opus Music / 4 Opus Voice），
+      // 并同步到上行 Producer 的 appData，便于观测与前端对账。
+      entry.accompanimentActive = active;
+      for (const producer of entry.media?.producers.values() ?? []) {
+        producer.appData = { ...producer.appData, accompanimentActive: active };
+      }
     } else if (command.type === "setMemberVolume") {
-      const clientId = command.payload.clientId as number;
-      entry.webrtc?.setMemberVolume(clientId, command.payload.volume as number);
+      // S5 起成员音量在浏览器侧按 clientId 作用于独立 GainNode（WebAudio 播放图），
+      // 服务端只回执，不再参与音量计算。
     }
     if (command.requestId) sendJson({ type: "commandCompleted", requestId: command.requestId });
   } catch (error: unknown) {
@@ -2097,7 +2507,7 @@ function classifyOperationError(error: unknown, fallbackCode: string, fallbackMe
   const normalized = text.toLocaleLowerCase();
   // A TeamSpeak server error id is authoritative when the SDK preserved it, so it
   // is consulted before the keyword rules: 781 (channel password), 2568
-  // (permissions), 515/2817 (server or slot limit) and friends keep their exact
+  // (permissions), 515/2817 (server capacity limit) and friends keep their exact
   // meaning instead of being guessed from prose.
   const serverCode =
     teamSpeakServerErrorCode(isRecord(error) ? (error.id ?? error.code) : undefined) ??
@@ -2123,23 +2533,10 @@ function sendProtocolError(sendJson: (message: Record<string, unknown>) => void,
   sendJson({ type: "error", error: { code, message, recoverable: false } });
 }
 
-function parseWebRtcOffer(raw: string): WebRtcSessionDescription | null {
-  let value: unknown;
-  try { value = JSON.parse(raw); } catch { return null; }
-  if (!isRecord(value) || value.type !== "webrtcOffer" || !isRecord(value.payload) || !isRecord(value.payload.sdp)) return null;
-  const description = value.payload.sdp;
-  if (description.type !== "offer" || typeof description.sdp !== "string" || description.sdp.length > 256 * 1024) return null;
-  if (value.payload.muted !== undefined && typeof value.payload.muted !== "boolean") return null;
-  if (value.payload.accompanimentActive !== undefined && typeof value.payload.accompanimentActive !== "boolean") return null;
-  return {
-    type: "offer",
-    sdp: description.sdp,
-    muted: value.payload.muted === true,
-    accompanimentActive: value.payload.accompanimentActive === true,
-  };
-}
-
-function isWebRtcStopMessage(raw: string): boolean {
+/**
+ * 旧客户端回退到兼容通道时发送的遗留信令（S6 起服务端无对应会话，静默忽略）。
+ */
+function isLegacyWebRtcStopMessage(raw: string): boolean {
   try {
     const value: unknown = JSON.parse(raw);
     return isRecord(value) && value.type === "webrtcStop";
@@ -2257,22 +2654,11 @@ function createAudioFlowStats(): AudioFlowStats {
     egressSentMaxGapMs: 0,
     egressPeakBufferedBytes: 0,
     egressFramesByClient: {},
-    webrtcIngressRtpFrames: 0,
-    webrtcIngressRtpFirstAt: null,
-    webrtcIngressRtpLastAt: null,
-    webrtcIngressRtpMaxGapMs: 0,
-    webrtcEgressRtpFrames: 0,
-    webrtcEgressRtpFirstAt: null,
-    webrtcEgressRtpLastAt: null,
-    webrtcEgressRtpMaxGapMs: 0,
   };
 }
 
 function snapshotAudioStats(entry: WebClientEntry): AudioFlowStats {
-  const stats = { ...entry.audio };
-  const webRtcStats: WebRtcAudioStats | undefined = entry.webrtc?.getStats();
-  if (webRtcStats) Object.assign(stats, webRtcStats);
-  return stats;
+  return { ...entry.audio };
 }
 
 function mapChannelTree(snapshot: TSDirectorySnapshot, avatarCache = new Map<string, string | null>()): unknown[] {

@@ -1,4 +1,5 @@
 import express from "express";
+import { randomBytes } from "node:crypto";
 import { createServer as createHttpsServer } from "node:https";
 import { createServer as createHttpServer } from "node:http";
 import { readFileSync } from "node:fs";
@@ -12,7 +13,14 @@ import { AdminSessionStore } from "../admin/admin-session.js";
 import { resolveSafeOpenTarget } from "../security/open-target-policy.js";
 import { identityFromString } from "@echosixhiya/teamspeak-client";
 import { JoinRateLimiter } from "./join-rate-limit.js";
-import { resolveIceServers } from "./webrtc-audio.js";
+import { generateTurnUserid, resolveIceServers } from "./ice-credentials.js";
+import {
+  VISITOR_NUMBER_COOKIE,
+  WEBSPEAK_DEVICE_COOKIE,
+  readVisitorNumberCookie,
+  readDeviceIdCookie,
+  collectPublicConfigCookies,
+} from "./http-cookies.js";
 import { MAX_TEAMSPEAK_NICKNAME_CHARACTERS, MIN_TEAMSPEAK_NICKNAME_CHARACTERS } from "../errors.js";
 import type { ConfiguredAccelerationRelay } from "./acceleration-relay.js";
 
@@ -32,8 +40,6 @@ export interface WebServer {
   start(): Promise<void>;
   stop(): Promise<void>;
 }
-
-const VISITOR_NUMBER_COOKIE = "webspeak_visitor_number";
 
 export function createWebServer(options: WebServerOptions): WebServer {
   const app = express();
@@ -66,26 +72,44 @@ export function createWebServer(options: WebServerOptions): WebServer {
   app.get("/api/public-config", (request, response) => {
     response.setHeader("Cache-Control", "no-store");
     const acceleration = resolveAccelerationOptions(options.voiceBridgeOptions.acceleration);
-    let visitorNumber = readVisitorNumberCookie(request.header("cookie"));
+    // 设备标识：请求里带合法 32 位 hex 就复用，否则新签发一个。仅在新签发时
+    // 回写 Cookie，避免每次请求都重复 Set-Cookie。
+    const existingDeviceId = readDeviceIdCookie(request.header("cookie"));
+    const deviceId = existingDeviceId ?? randomBytes(16).toString("hex");
+    const newDeviceId = existingDeviceId ? null : deviceId;
+    const rawVisitorNumber = readVisitorNumberCookie(request.header("cookie"));
+    let visitorNumber = rawVisitorNumber;
+    let newVisitorNumber: number | null = null;
     if (visitorNumber === null && options.nextVisitorNumber) {
       try {
         visitorNumber = options.nextVisitorNumber();
-        response.setHeader(
-          "Set-Cookie",
-          `${VISITOR_NUMBER_COOKIE}=${visitorNumber}; Max-Age=31536000; Path=/; SameSite=Lax${options.certDir ? "; Secure" : ""}`,
-        );
+        newVisitorNumber = visitorNumber;
       } catch (error: unknown) {
         logger.warn({ err: error instanceof Error ? error.message : String(error) }, "Visitor number could not be assigned");
       }
     }
+    // 访客编号与设备标识可能同时是新签发的，必须用数组一次性下发 ——
+    // 连续两次 setHeader("Set-Cookie", ...) 会让后一条覆盖前一条。
+    const cookiesToSet = collectPublicConfigCookies({
+      visitorNumber: newVisitorNumber,
+      deviceId: newDeviceId,
+      secure: Boolean(options.certDir),
+    });
+    if (cookiesToSet.length > 0) {
+      response.setHeader("Set-Cookie", cookiesToSet);
+    }
+    // 浏览器侧的 WebRTC ICE 配置由服务端下发，避免前端硬编码部署相关的地址。
+    // TURN userid 由设备标识前 12 位派生，使同一设备在 Cookie 有效期内拿到
+    // 稳定且独享的 TURN 配额；resolveIceServers 会为本次下发签发新鲜临时凭据
+    // （见 ice-credentials.ts）。
+    const clientTurnUserid = generateTurnUserid(deviceId.slice(0, 12));
+    const iceServers = resolveIceServers(clientTurnUserid);
     response.json({
       ...options.adminService.getPublicConfig(),
-      ...(visitorNumber === null ? {} : { visitorNumber }),
+      visitorNumber,
       accelerationAvailable: acceleration.length > 0,
       accelerationRelays: acceleration.map((relay) => ({ id: relay.id, name: relay.name })),
-      // 浏览器侧的 WebRTC ICE 配置由服务端下发，避免前端硬编码部署相关的地址。
-      // resolveIceServers 会为本次下发签发新鲜的 TURN 临时凭据（见 webrtc-audio.ts）。
-      iceServers: resolveIceServers(),
+      iceServers,
     });
   });
 
@@ -255,20 +279,6 @@ function resolveAccelerationOptions(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-
-function readVisitorNumberCookie(header: string | undefined): number | null {
-  if (!header) return null;
-  for (const entry of header.split(";")) {
-    const separator = entry.indexOf("=");
-    if (separator < 0) continue;
-    const name = entry.slice(0, separator).trim();
-    if (name !== VISITOR_NUMBER_COOKIE) continue;
-    const rawValue = entry.slice(separator + 1).trim();
-    const number = Number.parseInt(rawValue, 10);
-    return Number.isSafeInteger(number) && number > 0 ? number : null;
-  }
-  return null;
 }
 
 function isSameOrigin(request: express.Request): boolean {

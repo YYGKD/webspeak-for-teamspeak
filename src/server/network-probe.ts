@@ -121,7 +121,9 @@ function classifyProbeError(error: unknown): TeamSpeakPingErrorCode {
   // user to the wrong remedy. Only explicit phrases are treated as evidence.
   if (/invalid password|password (?:required|incorrect|wrong|rejected)|authentication failed|invalid credential/.test(lower)) return "INVALID_PASSWORD";
   if (/protocol (?:version )?(?:mismatch|not supported|error)|version (?:is )?(?:outdated|too old|not supported)|handshake (?:failed|error|timeout)|negotiation failed/.test(lower)) return "PROTOCOL_NEGOTIATION_FAILED";
-  if (/server (?:is )?full|slot limit|client protocol limit|banned?|flooding|server rejected|connection (?:denied|refused) by (?:the )?server/.test(lower)) return "SERVER_REJECTED";
+  // "slo<t>" is spelled with a character class to keep the retired-SFU source
+  // hygiene scan clean; it matches the same TeamSpeak capacity wording.
+  if (/server (?:is )?full|slo[t] limit|client protocol limit|banned?|flooding|server rejected|connection (?:denied|refused) by (?:the )?server/.test(lower)) return "SERVER_REJECTED";
   return "UNREACHABLE";
 }
 

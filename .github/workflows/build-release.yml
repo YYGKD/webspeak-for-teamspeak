@@ -42,6 +42,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm --prefix web ci --no-audit --no-fund
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/verify-worker.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $currentVersion = node -p "require('./package.json').version"
           if ($currentVersion -ne $releaseVersion) {
             npm version --no-git-tag-version $releaseVersion
@@ -65,6 +67,7 @@ jobs:
           $runtimeRoot = Split-Path -Parent (Get-Command node).Source
           New-Item -ItemType Directory -Path $packageRoot | Out-Null
           Copy-Item -Recurse -LiteralPath dist -Destination $packageRoot
+          Copy-Item -Recurse -LiteralPath vendor -Destination $packageRoot
           New-Item -ItemType Directory -Path (Join-Path $packageRoot "web") | Out-Null
           Copy-Item -Recurse -LiteralPath web/dist -Destination (Join-Path $packageRoot "web")
           Copy-Item -Recurse -LiteralPath node_modules -Destination $packageRoot
@@ -138,6 +141,7 @@ jobs:
           npm run prepare:sdk
           npm rebuild @discordjs/opus --foreground-scripts --no-audit --no-fund
           npm --prefix web ci --no-audit --no-fund
+          node scripts/verify-worker.mjs
           current_version="$(node -p "require('./package.json').version")"
           if [ "$current_version" != "$release_version" ]; then
             npm version --no-git-tag-version "$release_version"
@@ -157,6 +161,7 @@ jobs:
           mkdir -p "$package_root/web" "$package_root/runtime"
           cp -a dist "$package_root/dist"
           cp -a web/dist "$package_root/web/dist"
+          cp -a vendor "$package_root/vendor"
           cp -a node_modules "$package_root/node_modules"
           cp config.example.json README.md LICENSE package.json package-lock.json "$package_root/"
           cp "$runtime_root/bin/node" "$package_root/runtime/node"

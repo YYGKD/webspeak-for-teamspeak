@@ -59,6 +59,14 @@
 
 **管理コンソール → サーバー → 詳細設定** で有効にします。無効の状態で UDP ポート範囲（初期値 `40000–40099`）を設定し、ファイアウォールで許可して保存してください。有効中は範囲がロックされ、新しい接続で WebRTC を使用します。非対応のブラウザは互換トランスポートに戻ります。公開サイトでは HTTPS が必要です。
 
+メディアは内蔵の **mediasoup** 単一エンジンで処理します。話者は `clientId ↔ producerId ↔ consumerId` で動的に publish/subscribe され、予約された audio m-line やスロット上限はありません。関連する環境変数はいずれも任意です。
+
+- `MEDIASOUP_WORKER_BIN`：mediasoup worker の実行ファイルパス。既定では同梱のプリコンパイル済み `vendor/mediasoup-worker/` を使用し、SHA256 を検証します。Release パッケージと Docker イメージには同梱済みです。
+- `WEBSPEAK_MAX_SPEAKERS`：1 セッションで同時に publish する話者数（1–64、既定 32）。
+- `WEBSPEAK_MEDIA_PUBLIC_HOST`：プロキシ／ポートマッピング構成での公開メディアアドレス（ICE 候補の `announcedAddress` に書き込まれます）。メディアアドレスが待受アドレスと同じ場合は不要です。
+
+ポート範囲 `40000–40099` は **UDP と TCP の両方** を許可してください（TCP は ICE-over-TCP のフォールバック）。
+
 ### 画面共有の ICE 候補
 
 画面共有のメディアは引き続きブラウザ間の直接接続を優先し、WebSpeak はシグナリングだけを中継します。画面共有は音声 WebRTC と同じ ICE 設定（自前の STUN、必要に応じて外部 TURN）を再利用するため、個別の設定は不要です。STUN はメディアを運びません。
@@ -73,7 +81,7 @@ TURN を設定した場合、メディアは外部 TURN サービスを経由す
 
 中継は現在の WebSpeak セッションの TeamSpeak 通信だけを転送し、VPN ではありません。管理コンソールで複数のノードに名前、アドレス、トークンを設定すると、ユーザーは直接接続または中継を選択できます。中継モードは専用の転送サービスとして動作し、ゲスト画面や管理コンソールを提供しません。
 
-中継サービスは WebSpeak に組み込まれており、Node.js の標準ライブラリを使用します。GOST や sing-box などのプロキシフレームワークは不要です。WebRTC は [werift](https://github.com/shinyoshiaki/werift-webrtc)、TeamSpeak 接続はプロジェクトが保守する [EchoSixHIYA/teamspeak-js](https://github.com/EchoSixHIYA/teamspeak-js) SDK を使用します。
+中継サービスは WebSpeak に組み込まれており、Node.js の標準ライブラリを使用します。GOST や sing-box などのプロキシフレームワークは不要です。WebRTC メディアは [mediasoup](https://mediasoup.org/) `3.27.1`（ISC ライセンス）が処理します。従来の werift エンジンは廃止し、開発依存のテスト代替としてのみ残します。TeamSpeak 接続はプロジェクトが保守する [EchoSixHIYA/teamspeak-js](https://github.com/EchoSixHIYA/teamspeak-js) SDK を使用します。
 
 ## 🚀 デプロイ
 
@@ -116,6 +124,7 @@ npm start
 - WebRTC に対応した最新の Chrome、Edge などを使用してください。マイクとウィンドウ音声には通常 HTTPS が必要です。
 - WebSpeak のホストから TeamSpeak に到達できる必要があります。標準音声ポートは `9987` です。
 - Web サービスは `3040/TCP` を使用します。公開時は HTTPS と WebSocket をリバースプロキシ経由で公開してください。
+- WebRTC のポート範囲は既定で `40000–40099`（UDP と TCP）。全体を許可し、変更前に WebRTC を無効化してください。
 - IPv6 にはルーティング可能な IPv6、OS/コンテナで有効な IPv6、適切なファイアウォール設定が必要です。リテラルは `[2001:db8::1]#9987` の形式です。
 - 保存したブラウザ ID は同じブラウザで同時に1接続だけ使用できます。
 - BGM共有はデスクトップのみで、WebRTC が必要です。

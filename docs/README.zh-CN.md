@@ -58,10 +58,16 @@ WebRTC 将浏览器语音切换到实时媒体通道，也支持桌面端伴奏�
 
 1. 登录 `/admin`，打开“服务器”页的“高级参数”。
 2. 关闭 WebRTC 时设置 UDP 起止端口，默认范围为 `40000–40099`。
-3. 在 WebSpeak 主机的安全组和防火墙中放行整个 UDP 范围。
+3. 在 WebSpeak 主机的安全组和防火墙中放行整个 `40000–40099` 的 **UDP 与 TCP** 范围（TCP 用于 ICE-over-TCP 兜底）。
 4. 勾选“启用 WebRTC”并保存，用户重新进入后即可协商；不支持时会回退到兼容传输。
 
 WebRTC 启用后端口范围会锁定。要修改端口，先关闭 WebRTC 并保存，再修改端口并同步防火墙规则。公网使用还需要 HTTPS。
+
+媒体引擎为内置的 **mediasoup**（单引擎）：说话人按 `clientId ↔ producerId ↔ consumerId` 动态发布/订阅，不再有预分配的 audio m-line 或槽位上限。相关环境变量均为可选项：
+
+- `MEDIASOUP_WORKER_BIN`：mediasoup worker 可执行文件路径；缺省使用随包分发的 `vendor/mediasoup-worker/` 预编译产物并校验 SHA256。发布包与 Docker 镜像已内置，通常无需设置。
+- `WEBSPEAK_MAX_SPEAKERS`：单会话同时发布的说话人上限（1–64，默认 32）。
+- `WEBSPEAK_MEDIA_PUBLIC_HOST`：代理机房/端口映射部署时的公网媒体地址（写入 ICE candidate 的 `announcedAddress`）；媒体地址与监听地址一致时无需设置。
 
 ### 屏幕共享的 ICE 候选
 
@@ -142,7 +148,7 @@ docker run -d --name webspeak-relay --restart unless-stopped --network host \
 ### 3. 依赖与归属
 
 - 中继服务是 WebSpeak 自带实现，使用 Node.js 标准库，不依赖 GOST、sing-box 或其他代理框架。
-- WebRTC 使用 [werift](https://github.com/shinyoshiaki/werift-webrtc) `0.24.4`，上游采用 MIT 许可证。
+- WebRTC 媒体由 [mediasoup](https://mediasoup.org/) `3.27.1` 承载（ISC 许可证）；旧版使用的 werift 引擎已退役，仅作为测试替身保留在开发依赖中。
 - TeamSpeak 协议使用项目维护的 [EchoSixHIYA/teamspeak-js](https://github.com/EchoSixHIYA/teamspeak-js) SDK fork。
 
 ## 🧾 更新日志
@@ -222,7 +228,7 @@ npm start
 1. 打开 `http://<你的主机>:3040/admin`。
 2. 使用默认账号 `admin` / `admin` 登录，并立即设置至少 12 位的新密码。
 3. 在“服务器”页配置 TeamSpeak 目标和访问方式，例如 `voice.example.com#9987`。
-4. 公网使用时配置 HTTPS；启用 WebRTC 时放行控制台显示的 UDP 范围。
+4. 公网使用时配置 HTTPS；启用 WebRTC 时放行控制台显示的 UDP/TCP 端口范围。
 
 ## ⚠️ 要求和注意事项
 
@@ -232,7 +238,7 @@ npm start
 | TeamSpeak 网络 | WebSpeak 主机必须能够访问目标 TeamSpeak；默认语音端口为 `9987`。 |
 | Web 服务网络 | 服务使用 `3040/TCP`，公网建议通过 HTTPS 反向代理提供网页和 WebSocket。 |
 | IPv6 | IPv6 字面量写为 `[2001:db8::1]#9987`。主机/容器需要可路由 IPv6、启用 IPv6 的操作系统和 Node.js，以及相应防火墙放行。 |
-| WebRTC | 默认使用 `40000–40099/UDP`，启用后需放行整个范围；修改范围前先关闭 WebRTC。 |
+| WebRTC | 默认使用 `40000–40099` 的 UDP 与 TCP，启用后需放行整个范围；修改范围前先关闭 WebRTC。 |
 | 身份保持 | 同一浏览器身份同时只能保持一条活动连接；并行连接请关闭第二条的身份保持或使用其他浏览器配置文件。 |
 | 伴奏 | 仅桌面端提供且要求 WebRTC；选择窗口或标签页时还要勾选共享音频。 |
 | 数据 | Docker 数据在 `webspeak-data` volume；发布包和源码运行数据在 `data/`。升级前建议备份。 |

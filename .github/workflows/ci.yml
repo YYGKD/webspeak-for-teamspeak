@@ -26,10 +26,14 @@ jobs:
           npm run prepare:sdk
           npm rebuild @discordjs/opus --foreground-scripts --no-audit --no-fund
           npm --prefix web ci --no-audit --no-fund
+      - name: Verify vendored mediasoup worker
+        run: node scripts/verify-worker.mjs
       - name: Build application
         run: |
           npm run build
           npm --prefix web run build
+      - name: End-to-end media regression (headless WebRTC peers)
+        run: node scripts/mediasoup-e2e.mjs
 
   docker-smoke:
     needs: verify

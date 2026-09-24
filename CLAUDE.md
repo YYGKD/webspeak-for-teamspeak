@@ -9,6 +9,11 @@ Browser (PCM capture) → WebSocket → Node.js server (PCM→Opus) → TeamSpea
 Browser (playback)    ← WebSocket ← Node.js server (Opus relay) ← TeamSpeak server
 ```
 
+- Realtime audio (WebRTC) uses a single in-process **mediasoup** engine; the legacy werift engine and the pre-allocated SFU slot model were retired in S6.
+  - Downlink: TS3 `voiceData` → `speaker-producer-map` DirectTransport `Producer` → browser `mediasoup-client` consumer.
+  - Uplink: browser `Producer` → server DirectTransport `Consumer` → `tsClient.sendVoice` / `sendWhisper`.
+  - `WEBSPEAK_SFU_SLOTS` no longer exists; speaker count is bounded by `WEBSPEAK_MAX_SPEAKERS` (1–64, default 32).
+  - The WS binary path above remains as the compatibility fallback when WebRTC is unavailable.
 - Each browser user = one independent TS3 virtual client via `@echosixhiya/teamspeak-client`
 - Frontend captures PCM in an `AudioWorklet` when available (with a `ScriptProcessorNode` fallback), assembles fixed 960-sample frames, and sends Int16 binary over WebSocket
 - Server encodes PCM → Opus using `@discordjs/opus` (CJS, loaded via `createRequire`)
@@ -74,9 +79,16 @@ Uses TS6 WebQuery HTTP API (`http://tsHost:tsQueryPort/1/channellist`) with `x-a
 
 ## Build & Deploy
 ```bash
-npm install && cd web && npm install && npx vite build && cd .. && npx tsc
+npm ci --ignore-scripts
+npm run prepare:sdk
+npm rebuild @discordjs/opus --foreground-scripts
+npm --prefix web ci
+# Acceptance baseline (must be zero errors):
+npm run build && npm --prefix web run build
 node dist/index.js
 ```
+
+Media worker binaries are vendored under `vendor/mediasoup-worker/` and verified by `node scripts/verify-worker.mjs` (sha256 vs `SHA256SUMS`). Docker and CI run that check; never let mediasoup fall back to downloading a worker at runtime.
 
 ## Git
 - Remote: `https://github.com/EchoSixHIYA/web-client-for-TeamSpeak`

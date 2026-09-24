@@ -8,6 +8,9 @@ RUN apt-get update \
 COPY package.json package-lock.json ./
 COPY web/package.json web/package-lock.json ./web/
 RUN npm ci --ignore-scripts --no-audit --no-fund
+COPY scripts/verify-worker.mjs ./scripts/
+COPY vendor ./vendor
+RUN node scripts/verify-worker.mjs
 COPY scripts/prepare-sdk.mjs ./scripts/prepare-sdk.mjs
 RUN npm run prepare:sdk
 RUN npm rebuild @discordjs/opus --foreground-scripts --no-audit --no-fund
@@ -30,11 +33,13 @@ RUN apt-get update \
 
 ENV NODE_ENV=production
 ENV WEBSPEAK_DATA_DIR=/data
+ENV MEDIASOUP_WORKER_BIN=/app/vendor/mediasoup-worker/mediasoup-worker-linux-x64
 
 COPY --from=build --chown=node:node /app/package.json /app/package-lock.json ./
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --from=build --chown=node:node /app/web/dist ./web/dist
+COPY --from=build --chown=node:node /app/vendor ./vendor
 
 USER node
 VOLUME ["/data"]

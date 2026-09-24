@@ -19,7 +19,7 @@ const require = createRequire(import.meta.url);
 const { OpusEncoder } = require("@discordjs/opus");
 
 const SAMPLE_RATE = 48_000;
-const FRAME_SAMPLES = 960; // 20ms @ 48kHz，与 webrtc-audio.ts 的 AUDIO_FRAME_SAMPLES 一致
+const FRAME_SAMPLES = 960; // 20ms @ 48kHz 单声道帧长
 const FRAME_MS = 20;
 const FRAMES = 3_000; // 约 60 秒音频
 

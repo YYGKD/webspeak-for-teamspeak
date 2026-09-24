@@ -1,10 +1,7 @@
 /**
  * 公网端到端复验：真实 Chrome 经 https://tsweb.yygkd.com 走完整生产链路，
- * 读取 SFU 下行的 inbound-rtp 统计。
- *
- * 与 chrome-sfu-probe.mjs 的分工：那个把真实 Chrome 接到本机的
- * WebRtcAudioSession 上（隔离变量用）；这个连生产，验证"部署 + 反代 + 隧道 +
- * 媒体直连"整条链路。
+ * 读取 WebRTC 下行的 inbound-rtp 统计，验证"部署 + 反代 + 隧道 + 媒体直连"
+ * 整条链路。
  *
  * 为什么必须两个浏览器：网关不会把音频回送给发送者本人
  * （voice-bridge 里 `data.clientId === selfId` 直接 return），
