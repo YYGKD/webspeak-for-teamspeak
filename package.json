@@ -17,6 +17,7 @@
     "prepare:sdk": "node scripts/prepare-sdk.mjs",
     "verify:worker": "node scripts/verify-worker.mjs",
     "e2e:mediasoup": "node scripts/mediasoup-e2e.mjs",
+    "test": "node scripts/verify-worker.mjs && npx tsx scripts/media-worker-test.mjs && npx tsx scripts/speaker-producer-map-test.mjs && npx tsx scripts/upstream-pipeline-test.mjs && npx tsx scripts/audio-device-test.mjs && npx tsx scripts/screen-share-sfu-test.mjs && node scripts/mediasoup-e2e.mjs && npx tsx scripts/turn-credentials-test.mjs",
     "acceleration:poc": "node scripts/acceleration-poc/smoke.mjs",
     "acceleration:ipv6-smoke": "node scripts/acceleration-poc/smoke-ipv6.mjs",
     "acceleration:sdk-smoke": "node scripts/acceleration-poc/sdk-smoke.mjs",

@@ -16,3 +16,9 @@ memory/
 
 # mediasoup POC 工作区隔离（独立依赖，不纳入主线）
 poc/
+
+# 发布/调试产物：构建包与性能采样文件，易被 `git add .` 误入库
+*.tar.gz
+*.tgz
+*.cpuprofile
+*.patch-backup*/
