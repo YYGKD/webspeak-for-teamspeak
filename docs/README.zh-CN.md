@@ -4,18 +4,12 @@
 
 WebSpeak 是一个可自行部署的 TeamSpeak 3 / TeamSpeak 6 网页客户端与语音网关。用户无需安装桌面客户端即可从浏览器加入频道，管理员可以在控制台管理目标服务器、访问方式和运行状态。
 
-## 在线 Demo
-
-地址：<https://webspeak.online>
-
-公共 Demo 位于香港，网络和负载可能不稳定。延迟、断线或暂时不可用不代表自行部署后的实际表现。
-
 ## ✨ 特性
 
 | 能力 | 说明 |
 | --- | --- |
 | TeamSpeak 兼容 | 支持 TeamSpeak 3 与 TeamSpeak 6，并自动探测目标服务器协议。 |
-| 跨端 P2P 屏幕共享 | 支持浏览器用户与 TeamSpeak 6 原生客户端互相发起和观看屏幕共享；媒体优先通过 WebRTC/ICE 直连，WebSpeak 仅转发协商信令。 |
+| 屏幕共享 | 网页观众之间由网关 **mediasoup SFU 中央转发**（发起端只推 1 路，观众增加不放大上行带宽；画面与系统音频各为一路）；与 TeamSpeak 6 原生客户端互通仍走 WebRTC/ICE 直连。 |
 | IPv6 目标 | 默认支持 IPv6 TeamSpeak 目标和域名解析出的 IPv6 地址。 |
 | 频道与成员 | 浏览频道树、查看实时成员状态并切换频道。 |
 | 实时语音 | Opus 音频全程经内置 WebRTC（mediasoup 单引擎）低延迟传输；WebSocket 仅承担 JSON 业务与媒体控制信令。 |
@@ -157,6 +151,7 @@ docker run -d --name webspeak-relay --restart unless-stopped --network host \
 
 | 版本 | 日期 | 摘要 |
 | --- | --- | --- |
+| [v0.2.5](https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak/releases/tag/v0.2.5) | 2026-09-26 | WebRTC 引擎全量迁移到 mediasoup 单引擎并退役 WebSocket 二进制音频通道；屏幕共享改为网关 SFU 中央转发（H.264 硬件编码优先、画面与系统音频双轨），并修复分辨率被压到 1/4、观众退出清空直播端面板、无观众换频道误杀共享等问题；修复切换音频设备后失聪；新增 `npm test`。 |
 | [v0.2.4](https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak/releases/tag/v0.2.4) | 2026-09-22 | 新增浏览器与 TeamSpeak 6 原生客户端之间的跨端 P2P 屏幕共享；提供 STUN/外部 TURN 配置、直播播放器、观众状态、1080p/60 FPS 采集设置和 WebRTC 统计；优化屏幕共享交互并新增访客编号。 |
 | [v0.2.3](https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak/releases/tag/v0.2.3) | 2026-09-19 | 新增频道成员调度与按权限直接移动；支持头像、静音状态同步和身份恢复；更新五种语言的功能截图与文档。 |
 | [v0.2.2](https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak/releases/tag/v0.2.2) | 2026-09-17 | 提供浏览器端麦克风降噪、俄语和日语支持及按语言欢迎词配置；优化音量交互和 PR #2 基础上的错误提示与错误代码。 |

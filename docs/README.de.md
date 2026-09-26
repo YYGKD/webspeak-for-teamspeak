@@ -4,18 +4,12 @@
 
 WebSpeak ist ein selbst gehosteter Webclient und ein Sprach-Gateway für TeamSpeak 3 und TeamSpeak 6. Nutzer können ohne Desktop-Client im Browser Kanälen beitreten; Administratoren verwalten Zielserver, Zugriff und Laufzeitstatus über die Webkonsole.
 
-## Live-Demo
-
-Adresse: <https://webspeak.online>
-
-Die öffentliche Demo läuft in Hongkong. Netzwerkbedingungen und Auslastung können instabil sein; Latenz, Verbindungsabbrüche oder kurze Ausfälle beschreiben nicht jede eigene Bereitstellung.
-
 ## ✨ Funktionen
 
 | Funktion | Beschreibung |
 | --- | --- |
 | TeamSpeak-Kompatibilität | Unterstützt TeamSpeak 3 und TeamSpeak 6 und erkennt das Zielprotokoll automatisch. |
-| Plattformübergreifendes P2P-Bildschirmteilen | Browsernutzer und native TeamSpeak-6-Clients können die Bildschirmfreigabe gegenseitig starten und ansehen; WebRTC/ICE überträgt Medien direkt, WebSpeak leitet nur die Signalisierung weiter. |
+| Bildschirmfreigabe | Zwischen Web-Zuschauern leitet das Gateway die Medien über die **mediasoup-SFU** weiter (der Teilende sendet einen Stream, mehr Zuschauer erhöhen die Upload-Bandbreite also nicht; Video und Systemaudio als getrennte Spuren). Die Interoperabilität mit nativen TeamSpeak-6-Clients nutzt weiterhin einen direkten WebRTC/ICE-Pfad. |
 | IPv6-Ziele | IPv6-TeamSpeak-Ziele und über DNS aufgelöste IPv6-Adressen werden standardmäßig unterstützt. |
 | Kanäle und Mitglieder | Kanalstruktur und aktuelle Mitglieder anzeigen und Kanäle wechseln. |
 | Echtzeit-Sprache | Opus-Audio wird durchgängig über das integrierte WebRTC (mediasoup, einzige Engine) mit geringer Latenz übertragen; WebSocket übernimmt nur JSON-Business und Mediensteuerungs-Signalisierung. |
@@ -157,6 +151,7 @@ Relay deaktivieren und speichern, um die Option von der Willkommensseite zu entf
 
 | Version | Datum | Zusammenfassung |
 | --- | --- | --- |
+| [v0.2.5](https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak/releases/tag/v0.2.5) | 2026-09-26 | WebRTC-Engine vollständig auf mediasoup migriert und den binären WebSocket-Audiokanal entfernt; Bildschirmfreigabe nutzt jetzt die zentrale SFU-Weiterleitung (H.264-Hardware-Encoding zuerst, Video und Systemaudio als getrennte Spuren) mit Korrekturen an Auflösung (fiel auf ein Viertel), geleerter Leistungsanzeige beim Verlassen eines Zuschauers und beendeter Freigabe bei Kanalwechsel ohne Zuschauer; Audiogerätewechsel behoben; `npm test` hinzugefügt. |
 | [v0.2.4](https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak/releases/tag/v0.2.4) | 2026-09-22 | Plattformübergreifendes P2P-Bildschirmteilen zwischen Browsern und nativen TeamSpeak-6-Clients ergänzt; STUN-/externes-TURN-Konfiguration, Live-Player und Zuschauerstatus, Aufnahmeoptionen bis 1080p/60 FPS und WebRTC-Statistiken hinzugefügt; Bildschirmfreigabe-Interaktion verbessert und Besucherzählung ergänzt. |
 | [v0.2.3](https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak/releases/tag/v0.2.3) | 2026-09-19 | Mitgliederplanung und direkte Verschiebung nach Berechtigung ergänzt; Avatar-, Stummschaltstatus- und Identitätsunterstützung hinzugefügt; Screenshots und Dokumentation für alle fünf Sprachen aktualisiert. |
 | [v0.2.2](https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak/releases/tag/v0.2.2) | 2026-09-17 | Browserseitige Mikrofon-Geräuschunterdrückung, russische und japanische Oberfläche sowie sprachabhängige Begrüßungstexte ergänzt; Lautstärkeinteraktion und Fehlertexte/-codes auf Basis von PR #2 verbessert. |

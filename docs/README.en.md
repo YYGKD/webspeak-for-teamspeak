@@ -4,18 +4,12 @@
 
 WebSpeak is a self-hosted browser client and voice gateway for TeamSpeak 3 and TeamSpeak 6. Visitors can join channels without installing a desktop client, while administrators manage the target servers, access policy, and runtime state from the web console.
 
-## Live demo
-
-URL: <https://webspeak.online>
-
-The public demo is hosted in Hong Kong and its network conditions and load may be unstable. Latency, disconnections, or temporary downtime do not represent every self-hosted deployment.
-
 ## ✨ Features
 
 | Capability | Description |
 | --- | --- |
 | TeamSpeak compatibility | Supports TeamSpeak 3 and TeamSpeak 6 and automatically detects the target protocol. |
-| Cross-platform P2P screen sharing | Browser users and native TeamSpeak 6 clients can start and watch each other's screen shares; WebRTC/ICE carries media directly while WebSpeak relays negotiation signaling only. |
+| Screen sharing | Between web viewers the gateway forwards media through the **mediasoup SFU** (the sharer pushes one stream, so more viewers do not raise upstream bandwidth; video and system audio as separate tracks). Interop with native TeamSpeak 6 clients still uses a direct WebRTC/ICE path. |
 | IPv6 targets | IPv6 TeamSpeak targets and IPv6 addresses resolved from hostnames are supported by default. |
 | Channels and members | Browse the channel tree, see live member states, and switch channels. |
 | Realtime voice | Opus audio is carried end to end by the bundled WebRTC (single mediasoup engine) low-latency transport; WebSocket handles JSON business and media-control signaling only. |
@@ -157,6 +151,7 @@ Disable and save the relay configuration to remove the relay option from the wel
 
 | Version | Date | Summary |
 | --- | --- | --- |
+| [v0.2.5](https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak/releases/tag/v0.2.5) | 2026-09-26 | Moved the WebRTC engine fully to mediasoup and retired the WebSocket binary audio channel; screen sharing now uses SFU central forwarding (H.264 hardware encoding first, video and system audio as separate tracks) and fixes for resolution collapsing to a quarter, the broadcaster's panel being cleared when a viewer left, and a just-started share being killed on a channel change; fixed losing audio after switching devices; added `npm test`. |
 | [v0.2.4](https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak/releases/tag/v0.2.4) | 2026-09-22 | Added cross-platform P2P screen sharing between browsers and native TeamSpeak 6 clients; added STUN/external-TURN configuration, live player and viewer state, 1080p/60 FPS capture settings, and WebRTC statistics; refined screen-share interactions and added visitor numbering. |
 | [v0.2.3](https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak/releases/tag/v0.2.3) | 2026-09-19 | Added channel member scheduling and permission-aware direct moves; added avatar, mute-state, and remembered-identity support; refreshed feature screenshots and documentation for all five languages. |
 | [v0.2.2](https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak/releases/tag/v0.2.2) | 2026-09-17 | Added browser-side microphone noise suppression, Russian and Japanese UI, and per-language welcome text; refined volume interaction and error messages/codes on top of PR #2. |
