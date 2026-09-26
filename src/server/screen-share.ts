@@ -7,6 +7,8 @@
  * module never handles the resulting media packets.
  */
 
+import { ICE_SERVER_MAX_ENTRIES } from "./webrtc-config.js";
+
 export interface ScreenShareIceServer {
   urls: string | string[];
   username?: string;
@@ -20,7 +22,6 @@ export const DEFAULT_SCREEN_SHARE_ICE_SERVERS: readonly ScreenShareIceServer[] =
 ];
 
 const SCREEN_SHARE_ICE_URL_PATTERN = /^(?:stun|stuns|turn|turns):/i;
-const MAX_ICE_SERVER_COUNT = 8;
 const MAX_ICE_URL_LENGTH = 512;
 const MAX_ICE_CREDENTIAL_LENGTH = 512;
 
@@ -57,7 +58,7 @@ export function normalizeScreenShareIceServers(value?: readonly unknown[]): Scre
       ...(username !== undefined ? { username } : {}),
       ...(credential !== undefined ? { credential } : {}),
     });
-    if (normalized.length >= MAX_ICE_SERVER_COUNT) break;
+    if (normalized.length >= ICE_SERVER_MAX_ENTRIES) break;
   }
   if (normalized.length) return normalized;
   return DEFAULT_SCREEN_SHARE_ICE_SERVERS.map((server) => ({ ...server }));

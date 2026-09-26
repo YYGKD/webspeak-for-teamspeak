@@ -1,7 +1,7 @@
 import { Router, type NextFunction, type Request, type Response } from "express";
 import { closeSync, existsSync, fstatSync, openSync, readSync } from "node:fs";
 import type { Logger } from "../logger.js";
-import { AdminInputError, AdminService, type AdminSettingsInput, type RelayNodeInput } from "./admin-service.js";
+import { AdminInputError, AdminService, type AdminSettingsInput, type IceServerInput, type RelayNodeInput } from "./admin-service.js";
 import { AdminSessionStore, isSecureRequest } from "./admin-session.js";
 import { AdminLoginRateLimiter, waitFor } from "./login-rate-limit.js";
 import { TeamSpeakProbeError } from "../server/teamspeak-probe.js";
@@ -359,6 +359,32 @@ function readSettingsInput(body: Record<string, unknown>): AdminSettingsInput {
       };
     })
     : undefined;
+  // ICE entries are passed through unsliced on purpose. The other fields in this
+  // function are truncated to their column bound, which is harmless for a site
+  // name but not for a credential: cutting a password short turns into "the
+  // secret is quietly wrong", the hardest kind of failure to diagnose. Length
+  // limits are enforced (and rejected, not clamped) in
+  // AdminService.normalizeIceServers instead.
+  const iceServers = Array.isArray(body.iceServers)
+    ? body.iceServers.map((value): IceServerInput => {
+      const entry = asRecord(value);
+      return {
+        id: typeof entry.id === "string" ? entry.id.slice(0, 110) : undefined,
+        kind: entry.kind === "turn" ? "turn" : "stun",
+        urls: typeof entry.urls === "string" ? entry.urls : "",
+        credentialMode: entry.credentialMode === "static" || entry.credentialMode === "rest" ? entry.credentialMode : "none",
+        username: typeof entry.username === "string" ? entry.username : "",
+        credential: typeof entry.credential === "string" ? entry.credential : undefined,
+        // Only default when the key is absent. Filling in "keep" unconditionally
+        // would defeat the normalizer's contract that a submitted credential
+        // without an explicit action means "replace", so an API client posting
+        // {username, credential} would have its password silently ignored.
+        credentialAction: entry.credentialAction === undefined ? undefined : readPasswordAction(entry.credentialAction),
+        ttlSeconds: readOptionalInteger(entry, "ttlSeconds"),
+        enabled: entry.enabled === true,
+      };
+    })
+    : undefined;
   return {
     target: readString(body, "target", 300),
     serverPassword: typeof body.serverPassword === "string" ? body.serverPassword.slice(0, 512) : undefined,
@@ -380,6 +406,7 @@ function readSettingsInput(body: Record<string, unknown>): AdminSettingsInput {
     relayToken: typeof body.relayToken === "string" ? body.relayToken.slice(0, 512) : undefined,
     relayTokenAction: readPasswordAction(body.relayTokenAction),
     relayNodes,
+    iceServers,
   };
 }
 

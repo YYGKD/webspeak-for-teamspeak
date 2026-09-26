@@ -38,7 +38,49 @@ export interface WebRtcTurnConfig {
   ttlSeconds: number;
 }
 
-const DEFAULT_TURN_TTL_SECONDS = 1800;
+/** Default lifetime for a coturn REST credential when the administrator does not set one. */
+export const DEFAULT_TURN_TTL_SECONDS = 1800;
+
+/**
+ * STUN entries carry no credentials; TURN entries carry one of the two schemes below.
+ *
+ * Defined here rather than in the persistence layer because the admin console, the
+ * database schema and the ICE assembler all speak the same two unions — keeping
+ * them in the shared WebRTC config contract module avoids a server → persistence
+ * import in the reverse direction.
+ */
+export type IceServerKind = "stun" | "turn";
+
+/**
+ * How a TURN entry authenticates.
+ *
+ *   none   — only valid for `stun` entries; nothing is sent to the browser.
+ *   static — a long-term username/password issued by the provider, handed to the
+ *            browser verbatim. Deliberately high risk: the credential is public to
+ *            every visitor, so anyone who reads it can spend the provider's quota.
+ *   rest   — coturn's time-limited scheme (draft-uberti-behave-turn-rest): the
+ *            shared secret stays on the server and a fresh `<expiry>:<userid>` +
+ *            HMAC-SHA1 credential is minted per page load.
+ */
+export type IceCredentialMode = "none" | "static" | "rest";
+
+/** Accepted URL prefixes for an ICE entry. `stuns:`/`turns:` are the TLS forms. */
+export const ICE_URL_PREFIXES = ["stun:", "stuns:", "turn:", "turns:"] as const;
+
+/** TTL bounds for the `rest` scheme, matching the coturn contract in resolveTurnConfig(). */
+export const ICE_TTL_SECONDS_MIN = 60;
+export const ICE_TTL_SECONDS_MAX = 86_400;
+
+/**
+ * Upper bound on how many ICE entries may reach a browser, counted the way
+ * resolveIceServersFromEntries() emits them (a STUN URL becomes one entry, a TURN
+ * block stays one entry).
+ *
+ * The screen-share path already truncates at this size (screen-share.ts), so
+ * validating against the same number at save time turns a silent truncation into a
+ * rejected save. Both sides read this constant so they cannot drift apart.
+ */
+export const ICE_SERVER_MAX_ENTRIES = 8;
 
 export function resolveTurnConfig(): WebRtcTurnConfig | null {
   const urls = (process.env.WEBSPEAK_TURN_URLS ?? "")
@@ -49,6 +91,9 @@ export function resolveTurnConfig(): WebRtcTurnConfig | null {
   const secret = process.env.WEBSPEAK_TURN_SECRET?.trim() ?? "";
   if (!secret) return null;
   const raw = Number(process.env.WEBSPEAK_TURN_TTL_SECONDS);
-  const ttlSeconds = Number.isFinite(raw) && raw >= 60 && raw <= 86_400 ? Math.floor(raw) : DEFAULT_TURN_TTL_SECONDS;
+  const ttlSeconds =
+    Number.isFinite(raw) && raw >= ICE_TTL_SECONDS_MIN && raw <= ICE_TTL_SECONDS_MAX
+      ? Math.floor(raw)
+      : DEFAULT_TURN_TTL_SECONDS;
   return { urls, secret, ttlSeconds };
 }

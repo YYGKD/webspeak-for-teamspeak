@@ -77,6 +77,15 @@ Bildschirmfreigaben zwischen Web-Zuschauern laufen über die **zentrale mediasou
 
 Die Interoperabilität mit dem **nativen TeamSpeak-6-Client** bleibt Peer-to-Peer: Beide Seiten verbinden sich direkt über WebRTC/ICE (dieselbe ICE-Konfiguration wie bei Sprache – eigenes STUN und optional ein externer TURN-Dienst), und WebSpeak übernimmt nur Sitzungsberechtigung, Freigabestatus und SDP-/ICE-Signalisierung – es transportiert diese Medien **nicht**. Mit TURN kann das Medium diesen externen Dienst nutzen, niemals aber das WebSpeak-Gateway.
 
+### STUN- und TURN-Server
+
+Browser nutzen ICE-Server, um ihre öffentliche Zuordnung zu ermitteln (STUN) und bei symmetrischem NAT oder blockiertem UDP auf einen Relay auszuweichen (TURN). Das eingebaute öffentliche STUN funktioniert ohne Konfiguration.
+
+- **Admin-Konsole (empfohlen)**: die Karte **STUN-/TURN-Server** unter `/admin` → „Server“. Beliebig viele STUN- und TURN-Einträge, **kein Neustart nötig**. Leer lassen, um weiter die Umgebungsvariablen zu verwenden (`WEBSPEAK_STUN_URLS` / `WEBSPEAK_TURN_URLS` / `WEBSPEAK_TURN_SECRET` / `WEBSPEAK_TURN_TTL_SECONDS`) – ein Upgrade ändert für ein bestehendes Deployment nichts.
+- **Zwei TURN-Anmeldeverfahren**: **statischer Benutzername/Passwort** (was die meisten Drittanbieter anbieten) und das **coturn-REST-Shared-Secret** (das Secret bleibt auf dem Server, pro Seitenaufruf wird ein kurzlebiges Zugangsdatum ausgestellt). Passwörter und Secrets liegen als AES-256-GCM-Chiffrat in der Datenbank; die API meldet nur, ob eines gespeichert ist, Klartext erreicht den Browser nie.
+- **Reihenfolge ist Präferenz**: Die Listenreihenfolge ist die Reihenfolge, in der Browser es versuchen – den zuverlässigeren Server nach oben.
+- **Zu beachten**: Ein statisches Zugangsdatum geht an jeden Besucher und veröffentlicht damit ein wiederverwendbares Relay-Konto – setzen Sie beim Anbieter ein Kontingent. `turns:` (TURN über TLS) verlangt ein Zertifikat einer **vom Browser vertrauten CA** mit zum Hostnamen passendem SAN; selbstsignierte Zertifikate werden abgelehnt, da Browser nur ihre eingebaute Root-Liste vertrauen. Port 53 wird von Browsern blockiert und darf nicht verwendet werden.
+
 ### 2. Relay-Modus
 
 Ein Relay hilft, wenn ein TeamSpeak-Server Verbindungen aus einer anderen Region ablehnt oder der direkte Weg instabil ist. Es ist kein VPN, sondern leitet nur den TeamSpeak-Verkehr der aktuellen WebSpeak-Sitzung weiter.
@@ -222,7 +231,7 @@ npm run build
 npm start
 ```
 
-Die Produktionslaufzeit benötigt **keine native Transcoding-Abhängigkeit**: `@discordjs/opus` liegt jetzt in `devDependencies` und wird nur von den Offline-Tests verwendet (für Tests ggf. `npm rebuild @discordjs/opus` ausführen). Die vollständige Regressionssuite läuft mit `npm test` – Worker-Prüfung plus Codec, Sprecher-Mapping, Upstream-Pipeline, Audiogeräte, Bildschirmfreigabe-SFU, End-to-End und TURN-Anmeldedaten, insgesamt acht Suiten.
+Die Produktionslaufzeit benötigt **keine native Transcoding-Abhängigkeit**: `@discordjs/opus` liegt jetzt in `devDependencies` und wird nur von den Offline-Tests verwendet (für Tests ggf. `npm rebuild @discordjs/opus` ausführen). Die vollständige Regressionssuite läuft mit `npm test` – Worker-Prüfung plus Codec, Sprecher-Mapping, Upstream-Pipeline, Audiogeräte, Bildschirmfreigabe-SFU, End-to-End, TURN-Anmeldedaten und ICE-Konfiguration, insgesamt neun Suiten.
 
 ### Erste Konfiguration
 

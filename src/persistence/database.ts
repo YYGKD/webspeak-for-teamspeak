@@ -5,8 +5,9 @@ import { DatabaseSync } from "node:sqlite";
 import type { AdminCredential } from "../security/admin-password.js";
 import type { TeamSpeakProtocol } from "../server/teamspeak-adapter.js";
 import { DEFAULT_WEBRTC_UDP_PORT_RANGE } from "../server/webrtc-config.js";
+import type { IceCredentialMode, IceServerKind } from "../server/webrtc-config.js";
 
-export const DATABASE_SCHEMA_VERSION = 7;
+export const DATABASE_SCHEMA_VERSION = 8;
 
 /** How long audit events and expired invites are kept by default. */
 export const DEFAULT_AUDIT_RETENTION_DAYS = 90;
@@ -90,6 +91,30 @@ export type RelayNodeWrite = Omit<PersistedRelayNode, "createdAt" | "updatedAt">
   updatedAt?: string;
 };
 
+/** STUN entries carry no credentials; TURN entries carry one of the two schemes below. */
+export interface PersistedIceServer {
+  id: string;
+  kind: IceServerKind;
+  /** Comma-separated ICE URLs, e.g. `turn:a.example:3478?transport=udp,turns:a.example:443`. */
+  urls: string;
+  credentialMode: IceCredentialMode;
+  /** Only used by `static` entries. */
+  username: string;
+  /** encryptSecret(static password | REST shared secret). Never leaves the server in plaintext. */
+  credentialEncrypted: string | null;
+  /** Only used by `rest` entries. */
+  ttlSeconds: number;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** An ICE entry as written back to storage; timestamps are optional for rebuilt rows. */
+export type IceServerWrite = Omit<PersistedIceServer, "createdAt" | "updatedAt"> & {
+  createdAt?: string;
+  updatedAt?: string;
+};
+
 export interface ManagedInviteRecord {
   id: string;
   tokenHash: string;
@@ -153,6 +178,19 @@ interface RelayNodeRow extends Record<string, unknown> {
   host: string;
   port: number;
   token_encrypted: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface IceServerRow extends Record<string, unknown> {
+  id: string;
+  kind: string;
+  urls: string;
+  credential_mode: string;
+  username: string;
+  credential_encrypted: string | null;
+  ttl_seconds: number;
+  enabled: number;
   created_at: string;
   updated_at: string;
 }
@@ -268,6 +306,29 @@ export class WebSpeakDatabase {
     }));
   }
 
+  listIceServers(): PersistedIceServer[] {
+    // Order by rowid, not by created_at: writeIceServers() rewrites the whole table
+    // in submitted order, so rowid reproduces exactly the order the administrator
+    // arranged. created_at cannot — every row in one save shares the same
+    // timestamp, which would leave the tie to be broken by id, i.e. at random, and
+    // ICE order is meaningful (browsers try earlier entries first).
+    const rows = this.database.prepare(
+      "SELECT * FROM ice_servers ORDER BY rowid ASC",
+    ).all() as IceServerRow[];
+    return rows.map((row) => ({
+      id: row.id,
+      kind: row.kind === "turn" ? "turn" : "stun",
+      urls: row.urls,
+      credentialMode: row.credential_mode === "static" || row.credential_mode === "rest" ? row.credential_mode : "none",
+      username: row.username,
+      credentialEncrypted: row.credential_encrypted,
+      ttlSeconds: row.ttl_seconds,
+      enabled: row.enabled === 1,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
   /**
    * Settings, relay nodes and the connection-test reset must land together.
    *
@@ -282,13 +343,19 @@ export class WebSpeakDatabase {
    */
   updateSettings(
     settings: SettingsUpdate,
-    options: { auditEvent?: string; relayNodes?: RelayNodeWrite[] | null; clearConnectionTest?: boolean } = {},
+    options: {
+      auditEvent?: string;
+      relayNodes?: RelayNodeWrite[] | null;
+      iceServers?: IceServerWrite[] | null;
+      clearConnectionTest?: boolean;
+    } = {},
   ): void {
     const now = new Date().toISOString();
     this.transaction(() => {
       this.writeSettings(settings, now);
       this.insertAudit(options.auditEvent ?? "SETTINGS_CHANGED", { accessMode: settings.accessMode, target: `${settings.tsHost}:${settings.tsPort}` }, now);
       if (options.relayNodes) this.writeRelayNodes(options.relayNodes, now);
+      if (options.iceServers) this.writeIceServers(options.iceServers, now);
       if (options.clearConnectionTest) this.clearConnectionTest();
     });
   }
@@ -628,6 +695,37 @@ export class WebSpeakDatabase {
         `);
         this.database.exec("PRAGMA user_version = 7");
       });
+      version = 7;
+    }
+    if (version === 7) {
+      this.transaction(() => {
+        // STUN/TURN used to be environment-only (WEBSPEAK_STUN_URLS / WEBSPEAK_TURN_*).
+        // Moving it here lets an administrator change relays without touching
+        // systemd, and lets several entries coexist (e.g. the local coturn plus an
+        // external TURN as a fallback). The environment variables are still read
+        // when this table has no enabled entry, so existing deployments keep
+        // working untouched.
+        //
+        // credential_encrypted holds either a static long-term password or a
+        // coturn REST shared secret, always through encryptSecret() — never
+        // plaintext, because the database file is the backup unit.
+        this.database.exec(`
+          CREATE TABLE ice_servers (
+            id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL CHECK (kind IN ('stun', 'turn')),
+            urls TEXT NOT NULL,
+            credential_mode TEXT NOT NULL DEFAULT 'none' CHECK (credential_mode IN ('none', 'static', 'rest')),
+            username TEXT NOT NULL DEFAULT '',
+            credential_encrypted TEXT,
+            ttl_seconds INTEGER NOT NULL DEFAULT 1800 CHECK (ttl_seconds BETWEEN 60 AND 86400),
+            enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+          CREATE INDEX ice_servers_enabled_idx ON ice_servers(enabled);
+        `);
+        this.database.exec("PRAGMA user_version = 8");
+      });
     }
   }
 
@@ -647,6 +745,30 @@ export class WebSpeakDatabase {
         node.tokenEncrypted,
         node.createdAt ?? now,
         node.updatedAt ?? now,
+      );
+    }
+  }
+
+  private writeIceServers(entries: IceServerWrite[], now: string): void {
+    this.database.exec("DELETE FROM ice_servers");
+    const insert = this.database.prepare(
+      `INSERT INTO ice_servers (
+         id, kind, urls, credential_mode, username, credential_encrypted,
+         ttl_seconds, enabled, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (const entry of entries) {
+      insert.run(
+        entry.id,
+        entry.kind,
+        entry.urls,
+        entry.credentialMode,
+        entry.username,
+        entry.credentialEncrypted,
+        entry.ttlSeconds,
+        entry.enabled ? 1 : 0,
+        entry.createdAt ?? now,
+        entry.updatedAt ?? now,
       );
     }
   }

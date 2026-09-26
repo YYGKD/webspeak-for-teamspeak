@@ -3,13 +3,14 @@ import { existsSync } from "node:fs";
 import type { Logger } from "../logger.js";
 import { loadConfig } from "../config.js";
 import { formatTeamSpeakTarget, parseTeamSpeakTarget, type TeamSpeakTarget } from "../domain/teamspeak-target.js";
-import { type AccessMode, type ManagedInviteRecord, type PersistedRelayNode, type SettingsUpdate, WebSpeakDatabase } from "../persistence/database.js";
+import { type AccessMode, type IceServerWrite, type ManagedInviteRecord, type PersistedIceServer, type PersistedRelayNode, type SettingsUpdate, WebSpeakDatabase } from "../persistence/database.js";
 import { hashAdminPassword, validateAdminPassword, verifyAdminPassword } from "../security/admin-password.js";
 import { decryptSecret, encryptSecret } from "../security/secret-crypto.js";
 import { probeTeamSpeak, TeamSpeakProbeError } from "../server/teamspeak-probe.js";
 import { pingTeamSpeakHost } from "../server/network-probe.js";
 import { DEFAULT_ACCELERATION_RELAY_PORT, type ConfiguredAccelerationRelay } from "../server/acceleration-relay.js";
-import { DEFAULT_WEBRTC_UDP_PORT_RANGE, WEBRTC_UDP_PORT_MAX, WEBRTC_UDP_PORT_MIN, type WebRtcAudioOptions } from "../server/webrtc-config.js";
+import { DEFAULT_TURN_TTL_SECONDS, DEFAULT_WEBRTC_UDP_PORT_RANGE, ICE_SERVER_MAX_ENTRIES, ICE_TTL_SECONDS_MAX, ICE_TTL_SECONDS_MIN, ICE_URL_PREFIXES, WEBRTC_UDP_PORT_MAX, WEBRTC_UDP_PORT_MIN, type IceCredentialMode, type IceServerKind, type WebRtcAudioOptions } from "../server/webrtc-config.js";
+import { resolveIceServers, resolveIceServersFromEntries, type IceServerConfig, type IceServerEntry } from "../server/ice-credentials.js";
 import { DEFAULT_WELCOME_TEXTS, resolveWelcomeTexts } from "../site-copy.js";
 
 export interface AdminSettingsInput {
@@ -33,6 +34,7 @@ export interface AdminSettingsInput {
   relayToken?: string;
   relayTokenAction?: "keep" | "replace" | "remove";
   relayNodes?: RelayNodeInput[];
+  iceServers?: IceServerInput[];
 }
 
 export interface RelayNodeInput {
@@ -42,6 +44,25 @@ export interface RelayNodeInput {
   enabled: boolean;
   token?: string;
   tokenAction?: "keep" | "replace" | "remove";
+}
+
+/**
+ * One ICE entry as submitted by the admin console.
+ *
+ * `credential` is plaintext on the way in and is encrypted before it is stored;
+ * `credentialAction` mirrors the three-state password contract used elsewhere
+ * (keep / replace / remove) so an untouched entry never has to re-send its secret.
+ */
+export interface IceServerInput {
+  id?: string;
+  kind: IceServerKind;
+  urls: string;
+  credentialMode?: IceCredentialMode;
+  username?: string;
+  credential?: string;
+  credentialAction?: "keep" | "replace" | "remove";
+  ttlSeconds?: number;
+  enabled: boolean;
 }
 
 export interface ConnectionPolicy {
@@ -160,6 +181,7 @@ export class AdminService {
       relayTarget: settings.relayHost ? formatRelayTarget(settings.relayHost, settings.relayPort) : "",
       hasRelayToken: Boolean(settings.relayTokenEncrypted),
       relayNodes: this.getRelayNodeViews(),
+      iceServers: this.getIceServerViews(),
       internalPort: 3040,
       updatedAt: settings.updatedAt,
     };
@@ -191,9 +213,61 @@ export class AdminService {
     return this.getAccelerationRelayOptions()[0]?.name;
   }
 
+  /**
+   * The browser-facing ICE list, in precedence order:
+   *
+   *   1. enabled entries from the `ice_servers` table (admin console wins);
+   *   2. the environment (WEBSPEAK_STUN_URLS / WEBSPEAK_TURN_*);
+   *   3. built-in public STUN defaults.
+   *
+   * Step 2 exists so an existing deployment keeps working untouched after the
+   * upgrade — nothing is written to the new table by the migration, so the console
+   * only takes over once an administrator actually saves something. Clearing the
+   * table in the console deliberately falls back to the environment rather than to
+   * "no ICE at all".
+   *
+   * A stored entry whose secret fails to decrypt is skipped with a log line rather
+   * than aborting the whole list: one broken credential must not cost every client
+   * its STUN.
+   */
+  getResolvedIceServers(userid?: string): IceServerConfig[] {
+    const entries = this.enabledIceServerEntries();
+    if (entries.length) return resolveIceServersFromEntries(entries, userid);
+    return resolveIceServers(userid);
+  }
+
+  private enabledIceServerEntries(): IceServerEntry[] {
+    const entries: IceServerEntry[] = [];
+    for (const row of this.database.listIceServers()) {
+      if (!row.enabled) continue;
+      let credential: string | null = null;
+      if (row.credentialEncrypted) {
+        try {
+          credential = decryptSecret(row.credentialEncrypted, this.masterSecret);
+        } catch (error: unknown) {
+          this.logger.error(
+            { err: error instanceof Error ? error.message : String(error), iceServerId: row.id },
+            "Stored ICE credential could not be decrypted; the entry is skipped",
+          );
+          continue;
+        }
+      }
+      entries.push({
+        kind: row.kind,
+        urls: row.urls,
+        credentialMode: row.credentialMode,
+        username: row.username,
+        credential,
+        ttlSeconds: row.ttlSeconds,
+      });
+    }
+    return entries;
+  }
+
   updateSettings(input: AdminSettingsInput): void {
     const current = this.database.getSettings();
     const relayNodes = input.relayNodes === undefined ? undefined : this.normalizeRelayNodes(input.relayNodes);
+    const iceServers = input.iceServers === undefined ? undefined : this.normalizeIceServers(input.iceServers);
     const settings = this.normalizeSettings(input, current, relayNodes);
     const targetChanged = current.tsHost !== settings.tsHost || current.tsPort !== settings.tsPort;
     // The settings row, the relay node table and the cleared connection-test
@@ -208,8 +282,23 @@ export class AdminService {
         : null;
     this.database.updateSettings(settings, {
       ...(relayNodesToWrite ? { relayNodes: relayNodesToWrite } : {}),
+      // `iceServers: []` clears the table and hands the decision back to the
+      // environment; omitted means "leave the stored entries alone".
+      ...(iceServers !== undefined ? { iceServers } : {}),
       ...(targetChanged ? { clearConnectionTest: true } : {}),
     });
+    if (iceServers !== undefined) {
+      // The settings row already logs SETTINGS_CHANGED, but an ICE change deserves
+      // its own record: a `static` entry publishes a reusable relay credential to
+      // every visitor (see ice-credentials.ts), so "who turned that on, and when"
+      // must stay answerable. Only modes are recorded — never a URL or a secret.
+      this.database.addAudit("ICE_SERVERS_CHANGED", {
+        total: iceServers.length,
+        enabled: iceServers.filter((entry) => entry.enabled).length,
+        staticCredentials: iceServers.filter((entry) => entry.enabled && entry.credentialMode === "static").length,
+        modes: iceServers.map((entry) => `${entry.kind}:${entry.credentialMode}`),
+      });
+    }
   }
 
   getConnectionPolicy(): ConnectionPolicy {
@@ -533,6 +622,160 @@ export class AdminService {
     }));
   }
 
+  /**
+   * The admin-facing view of an ICE entry. `hasCredential` replaces the secret —
+   * the plaintext password / shared secret must never travel back to a browser,
+   * and the admin console only needs to know whether one is stored.
+   */
+  private getIceServerViews(): Array<{
+    id: string;
+    kind: IceServerKind;
+    urls: string;
+    credentialMode: IceCredentialMode;
+    username: string;
+    hasCredential: boolean;
+    ttlSeconds: number;
+    enabled: boolean;
+  }> {
+    return this.database.listIceServers().map((entry) => ({
+      id: entry.id,
+      kind: entry.kind,
+      urls: entry.urls,
+      credentialMode: entry.credentialMode,
+      username: entry.username,
+      hasCredential: Boolean(entry.credentialEncrypted),
+      ttlSeconds: entry.ttlSeconds,
+      enabled: entry.enabled,
+    }));
+  }
+
+  /**
+   * Validate and encrypt the submitted ICE entries.
+   *
+   * Rejections are loud on purpose: a silently dropped or silently truncated entry
+   * looks identical to a working configuration until a client fails to connect.
+   * The rules mirror what the browser and screen-share normalizer accept, so a
+   * saved configuration is exactly what reaches a client.
+   */
+  private normalizeIceServers(inputs: IceServerInput[]): IceServerWrite[] {
+    if (!Array.isArray(inputs)) throw new AdminInputError("INVALID_ICE_SERVERS", "ICE servers must be a list");
+    const current = new Map(this.database.listIceServers().map((entry) => [entry.id, entry]));
+    const seen = new Set<string>();
+    const now = new Date().toISOString();
+    const normalized = inputs.map((input) => {
+      const kind: IceServerKind = input.kind === "turn" ? "turn" : "stun";
+      const urls = typeof input.urls === "string" ? input.urls.trim() : "";
+      const urlList = urls.split(",").map((url) => url.trim()).filter(Boolean);
+      if (!urlList.length) throw new AdminInputError("INVALID_ICE_URLS", "At least one ICE URL is required");
+      for (const url of urlList) {
+        if (url.length > 512) throw new AdminInputError("INVALID_ICE_URLS", "An ICE URL must contain 512 characters or fewer");
+        if (!ICE_URL_PREFIXES.some((prefix) => url.toLowerCase().startsWith(prefix))) {
+          throw new AdminInputError("INVALID_ICE_URLS", `ICE URL must start with stun:, stuns:, turn: or turns: (got "${url}")`);
+        }
+        const port = iceUrlPort(url);
+        if (port !== null && (port < 1 || port > 65535)) {
+          throw new AdminInputError("INVALID_ICE_URLS", `ICE URL port must be between 1 and 65535 (got "${url}")`);
+        }
+        // Browsers block port 53 for ICE, so such a candidate never resolves and
+        // only delays ICE convergence.
+        if (port === 53) throw new AdminInputError("INVALID_ICE_URLS", `ICE URL must not use port 53 (got "${url}")`);
+        // `turns:` is TLS over TCP; a udp transport parameter contradicts the scheme.
+        if (url.toLowerCase().startsWith("turns:") && /transport=udp/i.test(url)) {
+          throw new AdminInputError("INVALID_ICE_URLS", `turns: URLs must not request transport=udp (got "${url}")`);
+        }
+      }
+
+      const requestedMode = input.credentialMode === "static" || input.credentialMode === "rest" ? input.credentialMode : "none";
+      // A credential-less TURN entry is almost always a half-filled form, and an
+      // open relay is exactly what this project's docs warn against — require an
+      // explicit scheme instead of emitting a relay the browser cannot authenticate.
+      if (kind === "turn" && requestedMode === "none") {
+        throw new AdminInputError("INVALID_ICE_CREDENTIAL_MODE", "A TURN entry must use either a static credential or a coturn REST shared secret");
+      }
+      const credentialMode: IceCredentialMode = kind === "stun" ? "none" : requestedMode;
+
+      const id = typeof input.id === "string" && /^ice-[a-z0-9-]{1,100}$/i.test(input.id)
+        ? input.id
+        : `ice-${randomBytes(8).toString("hex")}`;
+      if (seen.has(id)) throw new AdminInputError("INVALID_ICE_ID", "ICE entry id must be unique");
+      seen.add(id);
+
+      const previous = current.get(id);
+      const credentialAction = input.credentialAction ?? (input.credential === undefined ? "keep" : "replace");
+      let credentialEncrypted = previous?.credentialEncrypted ?? null;
+      if (credentialAction === "remove") credentialEncrypted = null;
+      if (credentialAction === "replace") {
+        // Trim like the relay token does: credentials are pasted from a provider
+        // dashboard and a stray newline would otherwise break authentication
+        // silently.
+        const value = typeof input.credential === "string" ? input.credential.trim() : "";
+        if (value.length > 512) throw new AdminInputError("INVALID_ICE_CREDENTIAL", "An ICE credential must contain 512 characters or fewer");
+        credentialEncrypted = value ? encryptSecret(value, this.masterSecret) : null;
+      }
+
+      let username = "";
+      let ttlSeconds = previous?.ttlSeconds ?? DEFAULT_TURN_TTL_SECONDS;
+      if (credentialMode === "static") {
+        username = typeof input.username === "string" ? input.username.trim() : "";
+        if (!username || username.length > 512) {
+          throw new AdminInputError("INVALID_ICE_USERNAME", "A static credential requires a username of 1 to 512 characters");
+        }
+        ttlSeconds = DEFAULT_TURN_TTL_SECONDS;
+      } else if (credentialMode === "rest") {
+        ttlSeconds = readIceTtlSeconds(input.ttlSeconds, previous?.ttlSeconds);
+      } else {
+        // A STUN entry (or an explicit "none" TURN entry) must not keep a stale
+        // secret in the database after the administrator switches the entry's kind
+        // or scheme.
+        credentialEncrypted = null;
+      }
+
+      if (credentialMode === "static" && !credentialEncrypted) {
+        throw new AdminInputError("INVALID_ICE_CREDENTIAL", "A password is required for a static credential");
+      }
+      // The 16-character floor applies to the REST shared secret only. That secret
+      // is ours to choose and RFC 8489 §9.2 asks for at least 128 bits of
+      // randomness in it. A static password is issued by the provider and is often
+      // short (ExpressTURN hands out 8-character ones), so requiring length there
+      // would reject perfectly valid configurations.
+      if (credentialMode === "rest" && (!credentialEncrypted || !this.canDecryptIceCredential(credentialEncrypted))) {
+        throw new AdminInputError("INVALID_ICE_CREDENTIAL", "A shared secret of at least 16 characters is required for the coturn REST scheme");
+      }
+
+      return {
+        id,
+        kind,
+        urls: urlList.join(","),
+        credentialMode,
+        username,
+        credentialEncrypted,
+        ttlSeconds,
+        enabled: input.enabled === true,
+        createdAt: previous?.createdAt ?? now,
+        updatedAt: now,
+      };
+    });
+
+    // STUN URLs become one browser entry each, so a handful of multi-URL entries
+    // could still overflow the client-side list. Count the way the resolver emits.
+    const emitted = normalized.reduce(
+      (total, entry) => total + (entry.kind === "stun" ? entry.urls.split(",").filter(Boolean).length : 1),
+      0,
+    );
+    if (emitted > ICE_SERVER_MAX_ENTRIES) {
+      throw new AdminInputError("TOO_MANY_ICE_SERVERS", `At most ${ICE_SERVER_MAX_ENTRIES} ICE entries may be configured`);
+    }
+    return normalized;
+  }
+
+  private canDecryptIceCredential(encrypted: string): boolean {
+    try {
+      return decryptSecret(encrypted, this.masterSecret).length >= 16;
+    } catch {
+      return false;
+    }
+  }
+
   private legacyRelayNodesFromSettings(settings: SettingsUpdate): PersistedRelayNode[] {
     if (!settings.relayConfigured || !settings.relayHost || !settings.relayTokenEncrypted) return [];
     const previous = this.database.listRelayNodes()[0];
@@ -630,6 +873,37 @@ function hashInviteToken(token: string): string {
 
 function formatRelayTarget(host: string, port: number): string {
   return `${host.includes(":") ? `[${host}]` : host}#${port}`;
+}
+
+/**
+ * Extract the explicit port from an ICE URL, or null when the URL omits it
+ * (RFC 7065 then defaults to 3478, or 5349 for `turns:`).
+ *
+ * Handles the IPv6 literal form (`turn:[::1]:3478`) because the port is the last
+ * colon-delimited segment either way; a bracketed host with no port ends in `]`
+ * and therefore yields null.
+ */
+function iceUrlPort(url: string): number | null {
+  const withoutScheme = url.replace(/^(?:stun|stuns|turn|turns):/i, "").split("?")[0];
+  const match = /:(\d+)$/.exec(withoutScheme);
+  return match ? Number(match[1]) : null;
+}
+
+/**
+ * TTL for the coturn REST scheme. Out-of-range values are rejected rather than
+ * clamped: the admin console is a form, and silently rewriting a number the
+ * administrator typed hides a mistake until a credential expires early.
+ */
+function readIceTtlSeconds(value: unknown, fallback: number | undefined): number {
+  if (value === undefined || value === null || value === "") return fallback ?? DEFAULT_TURN_TTL_SECONDS;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < ICE_TTL_SECONDS_MIN || parsed > ICE_TTL_SECONDS_MAX) {
+    throw new AdminInputError(
+      "INVALID_ICE_TTL",
+      `Credential lifetime must be an integer between ${ICE_TTL_SECONDS_MIN} and ${ICE_TTL_SECONDS_MAX} seconds`,
+    );
+  }
+  return parsed;
 }
 
 export class AdminInputError extends Error {

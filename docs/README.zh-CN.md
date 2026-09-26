@@ -77,6 +77,15 @@ WebRTC 启用后端口范围会锁定。要修改端口，先关闭 WebRTC 并�
 
 与 **TeamSpeak 6 原生客户端**互通时仍是点对点：双方经 WebRTC/ICE 直连（复用语音的同一套 ICE 配置——自建 STUN 与按需配置的外部 TURN），WebSpeak 只负责会话鉴权、共享状态与 SDP/ICE 信令转发，**不承载**这段媒体流量；配置了 TURN 时媒体可能经过该外部 TURN，但不会经过 WebSpeak 网关。
 
+### STUN 与 TURN 服务器
+
+浏览器用 ICE 服务器发现自己的公网映射地址（STUN），并在对称型 NAT 或 UDP 被封锁的网络下经中继（TURN）兜底。内置的公共 STUN 无需任何配置即可工作。
+
+- **管理后台（推荐）**：`/admin` →「服务器」页的 **STUN / TURN 服务器** 卡片，可同时维护多条 STUN 与 TURN，**无需重启服务**。留空则沿用服务器环境变量（`WEBSPEAK_STUN_URLS` / `WEBSPEAK_TURN_URLS` / `WEBSPEAK_TURN_SECRET` / `WEBSPEAK_TURN_TTL_SECONDS`），因此升级后既有部署行为不变。
+- **两类 TURN 凭据**：**静态用户名/密码**（多数第三方 TURN 服务只提供这种）与 **coturn REST 共享密钥**（密钥留在服务端，每次页面加载签发一份短期临时凭据）。密码与密钥在数据库中以 AES-256-GCM 密文保存，接口只返回“是否已保存”，明文不会下发到页面。
+- **顺序即偏好**：列表顺序就是浏览器尝试的顺序，把更可靠的服务器排在前面。
+- **注意**：静态凭据会随页面下发给每一位访客，等于公开一个可反复使用的中继账号，请务必在服务商侧设置配额。`turns:`（TURN over TLS）要求**受浏览器信任的 CA 签发**的证书且主机名与证书 SAN 匹配——自签证书不被接受，因为浏览器只信任内置根证书列表。端口 53 会被浏览器屏蔽，请勿使用。
+
 ### 2. 中继模式
 
 中继适用于 TeamSpeak 拒绝境外连接或直连不稳定的情况。它不是 VPN，只转发当前 WebSpeak 会话的 TeamSpeak 数据；目标服务器仍由用户在网页中选择。
@@ -222,7 +231,7 @@ npm run build
 npm start
 ```
 
-生产运行时**不需要任何原生转码依赖**（`@discordjs/opus` 已移至 `devDependencies`，仅供离线测试；要跑测试时再执行 `npm rebuild @discordjs/opus`）。运行完整回归测试：`npm test`——串联 worker 校验与编解码、说话人映射、上行管线、设备切换、屏幕共享 SFU、端到端、TURN 凭据共 8 个套件。
+生产运行时**不需要任何原生转码依赖**（`@discordjs/opus` 已移至 `devDependencies`，仅供离线测试；要跑测试时再执行 `npm rebuild @discordjs/opus`）。运行完整回归测试：`npm test`——串联 worker 校验与编解码、说话人映射、上行管线、设备切换、屏幕共享 SFU、端到端、TURN 凭据、ICE 配置共 9 个套件。
 
 ### 首次配置
 

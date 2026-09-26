@@ -11,6 +11,7 @@
  */
 import { createHmac, randomBytes } from "node:crypto";
 import { resolveTurnConfig } from "./webrtc-config.js";
+import type { IceCredentialMode, IceServerKind } from "./webrtc-config.js";
 
 /**
  * STUN 服务器地址。默认是公共 STUN，生产部署应通过 WEBSPEAK_STUN_URLS
@@ -85,5 +86,62 @@ export function resolveIceServers(userid?: string): IceServerConfig[] {
   const servers: IceServerConfig[] = resolveStunUrls().map((urls) => ({ urls: [urls] }));
   const turn = resolveTurnConfig();
   if (turn) servers.push({ urls: turn.urls, ...buildTurnCredentials(turn.secret, turn.ttlSeconds, userid) });
+  return servers;
+}
+
+/**
+ * One administrator-configured ICE entry, as read from the `ice_servers` table.
+ *
+ * `credential` is already decrypted by the caller — this module stays free of the
+ * persistence layer and of the master key, so it can be unit-tested directly
+ * (see scripts/ice-config-test.mjs).
+ */
+export interface IceServerEntry {
+  kind: IceServerKind;
+  /** Comma-separated ICE URLs, exactly as stored. */
+  urls: string;
+  credentialMode: IceCredentialMode;
+  /** Only meaningful for `static` entries. */
+  username: string;
+  /** Static password (plaintext) or REST shared secret (plaintext); null when absent. */
+  credential: string | null;
+  ttlSeconds: number;
+}
+
+/**
+ * Assemble the browser-facing ICE list from administrator-configured entries.
+ *
+ * Output shape deliberately matches resolveIceServers(): STUN URLs become one
+ * entry each, a TURN entry keeps all of its URLs together. That way the browser
+ * sees the same shape whether the config came from the admin console or from the
+ * environment, and the screen-share path's normalizer (screen-share.ts) behaves
+ * identically for both.
+ *
+ * Failure modes are closed, not open:
+ *   - an entry with no usable URL is skipped;
+ *   - a TURN entry with a missing credential is skipped rather than emitted as a
+ *     relay the browser cannot authenticate against (a dead TURN candidate only
+ *     delays ICE convergence);
+ *   - `stun` / `credentialMode: "none"` entries never carry credentials.
+ */
+export function resolveIceServersFromEntries(
+  entries: readonly IceServerEntry[],
+  userid?: string,
+): IceServerConfig[] {
+  const servers: IceServerConfig[] = [];
+  for (const entry of entries) {
+    const urls = entry.urls.split(",").map((url) => url.trim()).filter(Boolean);
+    if (!urls.length) continue;
+    if (entry.kind === "stun" || entry.credentialMode === "none") {
+      for (const url of urls) servers.push({ urls: [url] });
+      continue;
+    }
+    if (!entry.credential) continue;
+    if (entry.credentialMode === "static") {
+      servers.push({ urls, username: entry.username, credential: entry.credential });
+      continue;
+    }
+    servers.push({ urls, ...buildTurnCredentials(entry.credential, entry.ttlSeconds, userid) });
+  }
   return servers;
 }

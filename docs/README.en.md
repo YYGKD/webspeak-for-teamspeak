@@ -77,6 +77,15 @@ Screen sharing between web viewers goes through **mediasoup SFU central forwardi
 
 Interop with the **native TeamSpeak 6 client** remains peer-to-peer: both sides connect directly over WebRTC/ICE (reusing the same ICE configuration as voice — your own STUN plus an optional external TURN), and WebSpeak only handles session authorization, share state, and SDP/ICE signaling — it does **not** carry that media. With TURN configured the media may use that external service, but never the WebSpeak gateway.
 
+### STUN and TURN servers
+
+Browsers use ICE servers to discover their public mapping (STUN) and to fall back to a relay (TURN) on symmetric NAT or when UDP is blocked. The built-in public STUN works with no configuration.
+
+- **Admin console (recommended)**: the **STUN / TURN servers** card on the `/admin` → “Server” page. Add as many STUN and TURN entries as you need, **no restart required**. Leave it empty to keep using the server environment variables (`WEBSPEAK_STUN_URLS` / `WEBSPEAK_TURN_URLS` / `WEBSPEAK_TURN_SECRET` / `WEBSPEAK_TURN_TTL_SECONDS`), so an upgrade changes nothing for an existing deployment.
+- **Two TURN credential schemes**: **static username/password** (what most third-party TURN services offer) and the **coturn REST shared secret** (the secret stays on the server and a short-lived credential is issued per page load). Passwords and secrets are stored as AES-256-GCM ciphertext; the API only reports whether one is stored, and plaintext never reaches the browser.
+- **Order is preference**: the list order is the order browsers try, so put the more reliable server first.
+- **Caveats**: a static credential is handed to every visitor, which publishes a reusable relay account — set a quota with your provider. `turns:` (TURN over TLS) requires a certificate from a **CA the browser trusts** with a SAN matching the hostname; self-signed certificates are rejected because browsers only trust their built-in root list. Port 53 is blocked by browsers and must not be used.
+
 ### 2. Relay mode
 
 Use a relay when a TeamSpeak server rejects connections from another region or when the direct path is unstable. It is not a VPN: it forwards only the TeamSpeak traffic of the current WebSpeak session, while the visitor still chooses the target server in the web page.
@@ -222,7 +231,7 @@ npm run build
 npm start
 ```
 
-The production runtime needs **no native transcoding dependency**: `@discordjs/opus` now lives in `devDependencies` and is only used by the offline tests (run `npm rebuild @discordjs/opus` if you want to execute them). Run the full regression suite with `npm test` — worker verification plus codec, speaker map, upstream pipeline, audio device, screen-share SFU, end-to-end and TURN-credentials, eight suites in total.
+The production runtime needs **no native transcoding dependency**: `@discordjs/opus` now lives in `devDependencies` and is only used by the offline tests (run `npm rebuild @discordjs/opus` if you want to execute them). Run the full regression suite with `npm test` — worker verification plus codec, speaker map, upstream pipeline, audio device, screen-share SFU, end-to-end, TURN-credentials and ICE configuration, nine suites in total.
 
 ### First-time setup
 

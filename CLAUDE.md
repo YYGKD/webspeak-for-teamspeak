@@ -50,6 +50,9 @@ Audio flow counters are kept in memory and exposed in admin session summaries. D
 ### Test-only Opus
 Server-side Opus transcoding was retired, so `@discordjs/opus` is no longer imported by production code. It is a `devDependency` loaded only by the headless test suite through `scripts/lib/opus-codec.mjs`.
 
+### ICE Configuration (STUN / TURN)
+`AdminService.getResolvedIceServers(userid?)` is the single source for both voice (`/api/public-config`, wired through `WebServerOptions.iceServers`) and screen sharing (`voiceBridgeOptions.screenShareIceServers`, wired in `index.ts`), so the two paths cannot disagree. Precedence: enabled rows in the `ice_servers` table → `WEBSPEAK_STUN_URLS` / `WEBSPEAK_TURN_URLS` / `WEBSPEAK_TURN_SECRET` / `WEBSPEAK_TURN_TTL_SECONDS` → built-in public STUN. Two credential schemes: `static` (username/password handed to the browser verbatim) and `rest` (coturn shared secret; a fresh `<expiry>:<userid>` + HMAC-SHA1 credential per call, keeping the per-user quota bucket). Secrets go through `encryptSecret()` and never leave the server — the admin API returns only `hasCredential`. `listIceServers()` orders by `rowid` because one save writes every row with the same `created_at`, and list order is the browser's preference order. Validation rejects rather than truncates (`normalizeIceServers`): prefix whitelist, no port 53, `turns:` cannot carry `transport=udp`, and at most `ICE_SERVER_MAX_ENTRIES` (8) entries may reach a browser.
+
 ### WebSocket Message Routing
 - Text frames → JSON only: business commands (`listChannels`, `switchChannel`, chat, …), screen-share signaling, and mediasoup/WebRTC media signaling
 - Binary frames → rejected with the `UNSUPPORTED_BINARY_FRAME` protocol error (the WS audio channel is retired)

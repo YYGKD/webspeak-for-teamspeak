@@ -1348,9 +1348,13 @@ export class VoiceBridge {
    * 屏幕共享用的 ICE 服务器。
    *
    * v0.2.4 原本为此单独开了一个环境变量（WEBSPEAK_SCREEN_SHARE_ICE_SERVERS，
-   * 默认用 TeamSpeak 官方 STUN）。本项目自建 STUN，所以这里**复用语音 WebRTC
-   * 已经在用的那一套配置**（WEBSPEAK_STUN_URLS / WEBSPEAK_TURN_*）——
-   * 一个地方配置，两条链路都生效，不需要再记第二个环境变量。
+   * 默认用 TeamSpeak 官方 STUN）。现在语音与屏幕共享**共用同一个解析结果**：
+   * 生产由 index.ts 注入 `screenShareIceServers` 回调，指向
+   * AdminService.getResolvedIceServers（管理后台 `ice_servers` 表优先，
+   * 空表回退 WEBSPEAK_STUN_URLS / WEBSPEAK_TURN_*）。一个地方配置，两条链路
+   * 都生效，也不可能出现"语音走新配置、屏幕共享还走旧环境变量"的错配。
+   *
+   * 这里的 `resolveIceServers()` 兜底只服务于未注入回调的调用方（测试脚本）。
    */
   private getScreenShareIceServers(): ScreenShareIceServer[] {
     const configured = this.options.screenShareIceServers;

@@ -13,7 +13,7 @@ import { AdminSessionStore } from "../admin/admin-session.js";
 import { resolveSafeOpenTarget } from "../security/open-target-policy.js";
 import { identityFromString } from "@echosixhiya/teamspeak-client";
 import { JoinRateLimiter } from "./join-rate-limit.js";
-import { generateTurnUserid, resolveIceServers } from "./ice-credentials.js";
+import { generateTurnUserid, resolveIceServers, type IceServerConfig } from "./ice-credentials.js";
 import {
   VISITOR_NUMBER_COOKIE,
   WEBSPEAK_DEVICE_COOKIE,
@@ -34,6 +34,15 @@ export interface WebServerOptions {
   adminService: AdminService;
   logger: Logger;
   nextVisitorNumber?: () => number;
+  /**
+   * Browser-facing ICE list for /api/public-config.
+   *
+   * Injected rather than read from the environment here so the admin console's
+   * `ice_servers` table can take precedence while still falling back to
+   * WEBSPEAK_STUN_URLS / WEBSPEAK_TURN_* (see AdminService.getResolvedIceServers).
+   * Omitting it keeps the previous environment-only behaviour.
+   */
+  iceServers?: (userid?: string) => IceServerConfig[];
 }
 
 export interface WebServer {
@@ -103,7 +112,7 @@ export function createWebServer(options: WebServerOptions): WebServer {
     // 稳定且独享的 TURN 配额；resolveIceServers 会为本次下发签发新鲜临时凭据
     // （见 ice-credentials.ts）。
     const clientTurnUserid = generateTurnUserid(deviceId.slice(0, 12));
-    const iceServers = resolveIceServers(clientTurnUserid);
+    const iceServers = (options.iceServers ?? resolveIceServers)(clientTurnUserid);
     response.json({
       ...options.adminService.getPublicConfig(),
       visitorNumber,

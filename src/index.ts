@@ -2,6 +2,7 @@ import path from "node:path";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createAccelerationRelayServer } from "./server/acceleration-relay.js";
+import { generateTurnUserid } from "./server/ice-credentials.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = path.resolve(__dirname, "..");
@@ -64,8 +65,11 @@ async function main() {
     voiceBridgeOptions: {
       joinTickets,
       webRtc: () => adminService.getWebRtcAudioOptions(),
-      // 屏幕共享的 ICE 服务器不单独配置：voice-bridge 会复用语音 WebRTC 的
-      // 那一套（WEBSPEAK_STUN_URLS / WEBSPEAK_TURN_*），自建 STUN 只需配一处。
+      // 屏幕共享的 ICE 与语音共用同一套解析：管理后台 `ice_servers` 表优先，
+      // 表为空时回退到 WEBSPEAK_STUN_URLS / WEBSPEAK_TURN_*（见
+      // AdminService.getResolvedIceServers）。这里显式传入，voice-bridge 就不再
+      // 自己去读环境变量，两条链路不可能出现不一致。
+      screenShareIceServers: () => adminService.getResolvedIceServers(generateTurnUserid()),
       // The public gateway only uses the relay configuration explicitly
       // saved in the admin console. Environment variables belong to the
       // standalone relay process and must never make the relay option appear
@@ -73,6 +77,7 @@ async function main() {
       acceleration: () => adminService.getAccelerationRelayOptions(),
       accelerationName: () => adminService.getAccelerationRelayName(),
     },
+    iceServers: (userid?: string) => adminService.getResolvedIceServers(userid),
     adminService,
     logger,
     nextVisitorNumber: () => database.nextVisitorNumber(),

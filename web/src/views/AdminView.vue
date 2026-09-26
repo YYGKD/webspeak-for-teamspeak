@@ -38,6 +38,7 @@
             <article class="settings-card"><h3>{{ tr('accessAndIdentity') }}</h3><fieldset><legend>{{ tr('accessMode') }}</legend><label class="choice"><input v-model="serverForm.accessMode" type="radio" value="fixed" /><span><strong>{{ tr('fixedMode') }}</strong><small>{{ tr('fixedModeLead') }}</small></span></label><label class="choice"><input v-model="serverForm.accessMode" type="radio" value="open" /><span><strong>{{ tr('openMode') }}</strong><small>{{ tr('openModeLead') }}</small></span></label></fieldset><label><span>{{ tr('siteName') }}</span><input v-model.trim="serverForm.siteName" maxlength="80" /></label><div class="welcome-editor"><div class="welcome-editor-heading"><label><span>{{ tr('welcomeLanguage') }}</span><select v-model="welcomeLanguage"><option v-for="option in welcomeLanguageOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select></label><small>{{ tr('welcomeLanguageHint') }}</small></div><label><span>{{ tr('welcomeText') }} · {{ selectedWelcomeLanguageLabel }}</span><textarea v-model="selectedWelcomeText" maxlength="500" rows="4" :placeholder="selectedWelcomeDefault"></textarea></label><small class="field-help">{{ tr('welcomeFallbackHint') }}</small></div></article>
             <article class="settings-card advanced-card"><div><h3>{{ tr('advancedSettings') }}</h3><p class="card-help">{{ tr('advancedSettingsLead') }}</p></div><label class="choice toggle-choice"><input v-model="serverForm.webRtcEnabled" type="checkbox" @change="handleWebRtcToggle" /><span><strong>{{ tr('webrtcEnabled') }}</strong><small>{{ tr('webrtcEnabledLead') }}</small></span></label><div class="webrtc-port-fields"><div class="port-fields-heading"><strong>{{ tr('webrtcPortRange') }}</strong><small>{{ tr('webrtcPortRangeLead') }}</small></div><div class="port-inputs"><label><span>{{ tr('webrtcPortStart') }}</span><input v-model.number="serverForm.webRtcUdpStart" type="number" inputmode="numeric" min="1024" max="65535" :disabled="serverForm.webRtcEnabled" /></label><label><span>{{ tr('webrtcPortEnd') }}</span><input v-model.number="serverForm.webRtcUdpEnd" type="number" inputmode="numeric" min="1024" max="65535" :disabled="serverForm.webRtcEnabled" /></label></div></div><small class="field-help">{{ tr('webrtcApplyHint') }}</small></article>
             <article class="settings-card relay-card"><div><h3>{{ tr('relaySettings') }}</h3><p class="card-help">{{ tr('relaySettingsLead') }}</p></div><div v-if="!serverForm.relayNodes.length" class="relay-empty">{{ tr('relayNodeEmpty') }}</div><div class="relay-node-list"><div v-for="(relay, index) in serverForm.relayNodes" :key="relay.id" class="relay-node"><div class="relay-node-heading"><label class="relay-enabled"><input v-model="relay.enabled" type="checkbox" /><strong>{{ relay.name || tr('relayUnnamed') }}</strong></label><button class="text-danger" type="button" @click="removeRelayNode(index)">{{ tr('remove') }}</button></div><div class="relay-fields"><label><span>{{ tr('relayName') }}</span><input v-model.trim="relay.name" maxlength="80" :placeholder="tr('relayNamePlaceholder')" /></label><label><span>{{ tr('relayTarget') }}</span><input v-model.trim="relay.target" maxlength="300" :placeholder="tr('relayTargetPlaceholder')" /></label><div class="password-row"><label><span>{{ tr('relayToken') }}</span><input v-model="relay.token" type="password" autocomplete="off" :disabled="relay.tokenAction !== 'replace'" :placeholder="relay.hasToken ? tr('relayTokenConfigured') : tr('relayTokenPlaceholder')" /></label><div class="password-actions"><button type="button" :class="{ active: relay.tokenAction === 'replace' }" @click="relay.tokenAction = 'replace'">{{ tr('change') }}</button><button v-if="relay.hasToken" type="button" :class="{ danger: relay.tokenAction === 'remove' }" @click="relay.tokenAction = 'remove'">{{ tr('remove') }}</button></div></div></div></div></div><button class="secondary-button relay-add" type="button" @click="addRelayNode">{{ tr('relayAdd') }}</button><small class="field-help">{{ tr('relayManagedHint') }}</small></article>
+            <article class="settings-card relay-card"><div><h3>{{ tr('iceSettings') }}</h3><p class="card-help">{{ tr('iceSettingsLead') }}</p></div><div v-if="!serverForm.iceServers.length" class="relay-empty">{{ tr('iceEmpty') }}</div><div class="relay-node-list"><div v-for="(ice, index) in serverForm.iceServers" :key="ice.id" class="relay-node"><div class="relay-node-heading"><label class="relay-enabled"><input v-model="ice.enabled" type="checkbox" /><strong>{{ ice.urls || tr('iceUnnamed') }}</strong></label><button class="text-danger" type="button" @click="removeIceServer(index)">{{ tr('remove') }}</button></div><div class="relay-fields"><label><span>{{ tr('iceKind') }}</span><select v-model="ice.kind" @change="handleIceKindChange(ice)"><option value="stun">{{ tr('iceKindStun') }}</option><option value="turn">{{ tr('iceKindTurn') }}</option></select></label><label><span>{{ tr('iceUrls') }}</span><input v-model.trim="ice.urls" maxlength="2048" :placeholder="tr('iceUrlsPlaceholder')" /></label><label v-if="ice.kind === 'turn'"><span>{{ tr('iceCredentialMode') }}</span><select v-model="ice.credentialMode"><option value="static">{{ tr('iceModeStatic') }}</option><option value="rest">{{ tr('iceModeRest') }}</option></select></label><label v-if="ice.kind === 'turn' && ice.credentialMode === 'static'"><span>{{ tr('iceUsername') }}</span><input v-model.trim="ice.username" maxlength="512" autocomplete="off" :placeholder="tr('iceUsernamePlaceholder')" /></label><label v-if="ice.kind === 'turn' && ice.credentialMode === 'rest'"><span>{{ tr('iceTtl') }}</span><input v-model.number="ice.ttlSeconds" type="number" inputmode="numeric" min="60" max="86400" /></label><div v-if="ice.kind === 'turn'" class="password-row"><label><span>{{ ice.credentialMode === 'rest' ? tr('iceSharedSecret') : tr('icePassword') }}</span><input v-model="ice.credential" type="password" autocomplete="off" :disabled="ice.credentialAction !== 'replace'" :placeholder="ice.hasCredential ? tr('iceCredentialConfigured') : tr('iceCredentialPlaceholder')" /></label><div class="password-actions"><button type="button" :class="{ active: ice.credentialAction === 'replace' }" @click="ice.credentialAction = 'replace'">{{ tr('change') }}</button><button v-if="ice.hasCredential" type="button" :class="{ danger: ice.credentialAction === 'remove' }" @click="ice.credentialAction = 'remove'">{{ tr('remove') }}</button></div></div></div><small v-if="ice.kind === 'turn' && ice.credentialMode === 'static'" class="field-help ice-warning">{{ tr('iceStaticWarning') }}</small></div></div><button class="secondary-button relay-add" type="button" @click="addIceServer">{{ tr('iceAdd') }}</button><small class="field-help">{{ tr('iceManagedHint') }}</small></article>
           </div>
           <article class="readonly-card"><h3>{{ tr('runtimeFacts') }}</h3><dl><div><dt>{{ tr('lastTest') }}</dt><dd>{{ formatDate(serverForm.lastTestAt) }}</dd></div><div><dt>{{ tr('latency') }}</dt><dd>{{ serverForm.lastTestLatencyMs == null ? '—' : `${serverForm.lastTestLatencyMs} ms` }}</dd></div><div><dt>{{ tr('internalPort') }}</dt><dd>3040</dd></div></dl></article>
         </section>
@@ -82,6 +83,7 @@ type Screen = "login" | "change-password" | "admin";
 type AccessMode = "fixed" | "open";
 interface ProbeState { ok: boolean; checkType?: "network" | "protocol"; passwordVerified?: boolean; latencyMs?: number; serverName?: string | null; packetLossPercent?: number; attempts?: number; successfulAttempts?: number; code?: string; errorCode?: string }
 interface RelayNodeForm { id: string; name: string; enabled: boolean; target: string; token: string; tokenAction: "keep" | "replace" | "remove"; hasToken: boolean }
+interface IceServerForm { id: string; kind: "stun" | "turn"; urls: string; credentialMode: "none" | "static" | "rest"; username: string; credential: string; credentialAction: "keep" | "replace" | "remove"; hasCredential: boolean; ttlSeconds: number; enabled: boolean }
 type WelcomeLanguage = "zh" | "en" | "de" | "ru" | "ja";
 type WelcomeTextField = "welcomeText" | "welcomeTextEn" | "welcomeTextDe" | "welcomeTextRu" | "welcomeTextJa";
 
@@ -113,7 +115,7 @@ const newPassword = ref("");
 const confirmNewPassword = ref("");
 const testResult = ref<ProbeState | null>(null);
 
-const serverForm = reactive({ address: "", port: "9987", serverPassword: "", passwordAction: "keep" as "keep" | "replace" | "remove", hasPassword: false, accessMode: "fixed" as AccessMode, siteName: "WebSpeak", welcomeText: "", welcomeTextEn: "", welcomeTextDe: "", welcomeTextRu: "", welcomeTextJa: "", welcomeDefaults: { ...DEFAULT_WELCOME_TEXTS }, webRtcEnabled: false, webRtcUdpStart: 40000, webRtcUdpEnd: 40099, relayConfigured: false, relayEnabled: false, relayName: "", relayTarget: "", relayToken: "", relayTokenAction: "keep" as "keep" | "replace" | "remove", hasRelayToken: false, relaySettingsTouched: false, relayNodes: [] as RelayNodeForm[], lastTestAt: null as string | null, lastTestLatencyMs: null as number | null });
+const serverForm = reactive({ address: "", port: "9987", serverPassword: "", passwordAction: "keep" as "keep" | "replace" | "remove", hasPassword: false, accessMode: "fixed" as AccessMode, siteName: "WebSpeak", welcomeText: "", welcomeTextEn: "", welcomeTextDe: "", welcomeTextRu: "", welcomeTextJa: "", welcomeDefaults: { ...DEFAULT_WELCOME_TEXTS }, webRtcEnabled: false, webRtcUdpStart: 40000, webRtcUdpEnd: 40099, relayConfigured: false, relayEnabled: false, relayName: "", relayTarget: "", relayToken: "", relayTokenAction: "keep" as "keep" | "replace" | "remove", hasRelayToken: false, relaySettingsTouched: false, relayNodes: [] as RelayNodeForm[], iceServers: [] as IceServerForm[], lastTestAt: null as string | null, lastTestLatencyMs: null as number | null });
 const welcomeLanguage = ref<WelcomeLanguage>("zh");
 const overview = reactive({ gateway: { version: "", uptimeSeconds: 0 }, teamSpeak: { target: "", status: "unknown", lastTestAt: null as string | null, latencyMs: null as number | null }, sessions: { active: 0, peak: 0, limit: 100 }, recentEvents: [] as Array<{ event: string; createdAt: string }>, legacyConfigImported: false });
 interface AdminSession { id: string; nickname: string; target: string; state: string; createdAt: string; ageSeconds: number; tsClientId: number | null; channelId: string | null; memberCount: number }
@@ -222,6 +224,28 @@ const copy = {
     relayAdd: "添加中继节点",
     relayNodeEmpty: "尚未配置中继节点。",
     relayUnnamed: "未命名中继",
+    iceSettings: "STUN / TURN 服务器",
+    iceSettingsLead: "浏览器用于发现网络路径与中继的 ICE 服务器。此处配置优先于服务器环境变量。",
+    iceEmpty: "尚未配置。留空时沿用服务器环境变量（WEBSPEAK_STUN_URLS / WEBSPEAK_TURN_*）。",
+    iceAdd: "添加 ICE 服务器",
+    iceUnnamed: "未填写地址",
+    iceKind: "类型",
+    iceKindStun: "STUN",
+    iceKindTurn: "TURN（中继）",
+    iceUrls: "服务器地址",
+    iceUrlsPlaceholder: "turn:turn.example.com:3478?transport=udp",
+    iceCredentialMode: "凭据方式",
+    iceModeStatic: "静态用户名与密码",
+    iceModeRest: "coturn REST 共享密钥",
+    iceUsername: "用户名",
+    iceUsernamePlaceholder: "服务商提供的用户名",
+    icePassword: "密码",
+    iceSharedSecret: "共享密钥",
+    iceCredentialConfigured: "已保存，留空则不修改",
+    iceCredentialPlaceholder: "服务商提供的凭据",
+    iceTtl: "凭据有效期（秒）",
+    iceStaticWarning: "静态凭据会随页面下发给每一位访客，等于公开一个可反复使用的中继账号。仅在服务商只提供固定凭据时使用，并建议设置配额。",
+    iceManagedHint: "地址支持逗号分隔多个，总数最多 8 条。密码与密钥只保存为加密密文，不会返回到页面。",
     relayManagedHint: "当前使用管理控制台保存的中继配置。令牌只保存为加密密文，不会返回到页面。",
     relayEnvironmentHint: "中继仅使用此页面保存的配置；关闭并保存后，访客页面不会显示中继选项。",
     accessMode: "访客访问模式",
@@ -426,6 +450,28 @@ const copy = {
     relayAdd: "Add relay node",
     relayNodeEmpty: "No relay nodes are configured.",
     relayUnnamed: "Unnamed relay",
+    iceSettings: "STUN / TURN servers",
+    iceSettingsLead: "The ICE servers browsers use to discover a network path and to relay. What you configure here takes precedence over the server environment variables.",
+    iceEmpty: "Nothing configured. Leave empty to keep using the server environment variables (WEBSPEAK_STUN_URLS / WEBSPEAK_TURN_*).",
+    iceAdd: "Add ICE server",
+    iceUnnamed: "No address yet",
+    iceKind: "Type",
+    iceKindStun: "STUN",
+    iceKindTurn: "TURN (relay)",
+    iceUrls: "Server address",
+    iceUrlsPlaceholder: "turn:turn.example.com:3478?transport=udp",
+    iceCredentialMode: "Credential scheme",
+    iceModeStatic: "Static username and password",
+    iceModeRest: "coturn REST shared secret",
+    iceUsername: "Username",
+    iceUsernamePlaceholder: "Username from your provider",
+    icePassword: "Password",
+    iceSharedSecret: "Shared secret",
+    iceCredentialConfigured: "Stored — leave blank to keep",
+    iceCredentialPlaceholder: "Credential from your provider",
+    iceTtl: "Credential lifetime (seconds)",
+    iceStaticWarning: "A static credential is handed to every visitor, which publishes a reusable relay account. Use it only when your provider offers nothing else, and set a quota.",
+    iceManagedHint: "Separate several addresses with commas, up to 8 entries in total. Passwords and secrets are stored encrypted and are never returned to the browser.",
     relayManagedHint: "The relay is managed from the console. The token is stored encrypted and is never returned to the browser.",
     relayEnvironmentHint: "The relay uses only the settings saved here. After you disable and save it, visitors will no longer see the relay option.",
     accessMode: "Guest access mode",
@@ -621,6 +667,28 @@ const germanCopy = {
   relayAdd: "Relay-Knoten hinzufügen",
   relayNodeEmpty: "Keine Relay-Knoten konfiguriert.",
   relayUnnamed: "Unbenannter Relay",
+  iceSettings: "STUN-/TURN-Server",
+  iceSettingsLead: "Die ICE-Server, über die Browser einen Netzwerkpfad finden und relayen. Was hier konfiguriert ist, hat Vorrang vor den Umgebungsvariablen des Servers.",
+  iceEmpty: "Nichts konfiguriert. Leer lassen, um weiter die Umgebungsvariablen zu verwenden (WEBSPEAK_STUN_URLS / WEBSPEAK_TURN_*).",
+  iceAdd: "ICE-Server hinzufügen",
+  iceUnnamed: "Noch keine Adresse",
+  iceKind: "Typ",
+  iceKindStun: "STUN",
+  iceKindTurn: "TURN (Relay)",
+  iceUrls: "Serveradresse",
+  iceUrlsPlaceholder: "turn:turn.example.com:3478?transport=udp",
+  iceCredentialMode: "Anmeldeverfahren",
+  iceModeStatic: "Statischer Benutzername und Passwort",
+  iceModeRest: "coturn-REST-Shared-Secret",
+  iceUsername: "Benutzername",
+  iceUsernamePlaceholder: "Benutzername vom Anbieter",
+  icePassword: "Passwort",
+  iceSharedSecret: "Shared Secret",
+  iceCredentialConfigured: "Gespeichert – leer lassen zum Beibehalten",
+  iceCredentialPlaceholder: "Zugangsdaten vom Anbieter",
+  iceTtl: "Gültigkeitsdauer (Sekunden)",
+  iceStaticWarning: "Ein statisches Zugangsdatum geht an jeden Besucher und veröffentlicht damit ein wiederverwendbares Relay-Konto. Nur verwenden, wenn der Anbieter nichts anderes bietet – und ein Kontingent setzen.",
+  iceManagedHint: "Mehrere Adressen durch Kommas trennen, insgesamt höchstens 8 Einträge. Passwörter und Secrets werden verschlüsselt gespeichert und nie an den Browser zurückgegeben.",
   relayManagedHint: "Der Relay wird über die Konsole verwaltet. Das Token wird verschlüsselt gespeichert und nie an den Browser zurückgegeben.",
   relayEnvironmentHint: "Der Relay verwendet nur die hier gespeicherten Einstellungen. Nach dem Deaktivieren und Speichern wird die Option für Besucher ausgeblendet.",
   accessMode: "Gastzugriff",
@@ -750,6 +818,28 @@ const russianCopy = {
   relayAdd: "Добавить узел ретрансляции",
   relayNodeEmpty: "Узлы ретрансляции не настроены.",
   relayUnnamed: "Ретранслятор без названия",
+  iceSettings: "Серверы STUN / TURN",
+  iceSettingsLead: "ICE-серверы, через которые браузер находит сетевой путь и использует ретрансляцию. Настроенное здесь имеет приоритет над переменными окружения сервера.",
+  iceEmpty: "Ничего не настроено. Оставьте пустым, чтобы использовать переменные окружения (WEBSPEAK_STUN_URLS / WEBSPEAK_TURN_*).",
+  iceAdd: "Добавить ICE-сервер",
+  iceUnnamed: "Адрес не указан",
+  iceKind: "Тип",
+  iceKindStun: "STUN",
+  iceKindTurn: "TURN (ретрансляция)",
+  iceUrls: "Адрес сервера",
+  iceUrlsPlaceholder: "turn:turn.example.com:3478?transport=udp",
+  iceCredentialMode: "Способ аутентификации",
+  iceModeStatic: "Статические имя пользователя и пароль",
+  iceModeRest: "Общий секрет coturn REST",
+  iceUsername: "Имя пользователя",
+  iceUsernamePlaceholder: "Имя пользователя от провайдера",
+  icePassword: "Пароль",
+  iceSharedSecret: "Общий секрет",
+  iceCredentialConfigured: "Сохранено — оставьте пустым, чтобы не менять",
+  iceCredentialPlaceholder: "Учётные данные от провайдера",
+  iceTtl: "Срок действия (секунды)",
+  iceStaticWarning: "Статические учётные данные передаются каждому посетителю — это публикует многоразовую учётную запись ретранслятора. Используйте только если провайдер не даёт другого, и задайте квоту.",
+  iceManagedHint: "Несколько адресов разделяйте запятыми, всего не более 8 записей. Пароли и секреты хранятся зашифрованными и не возвращаются в браузер.",
   accessMode: "Режим доступа гостей",
   fixedMode: "Только этот сервер TeamSpeak",
   openMode: "Разрешить другие серверы TeamSpeak",
@@ -869,6 +959,28 @@ const japaneseCopy = {
   relayAdd: "中継ノードを追加",
   relayNodeEmpty: "中継ノードは設定されていません。",
   relayUnnamed: "名前のない中継",
+  iceSettings: "STUN / TURN サーバー",
+  iceSettingsLead: "ブラウザがネットワーク経路の探索と中継に使う ICE サーバーです。ここでの設定はサーバーの環境変数より優先されます。",
+  iceEmpty: "未設定です。空欄のままにするとサーバーの環境変数（WEBSPEAK_STUN_URLS / WEBSPEAK_TURN_*）を使用します。",
+  iceAdd: "ICE サーバーを追加",
+  iceUnnamed: "アドレス未入力",
+  iceKind: "種類",
+  iceKindStun: "STUN",
+  iceKindTurn: "TURN（中継）",
+  iceUrls: "サーバーアドレス",
+  iceUrlsPlaceholder: "turn:turn.example.com:3478?transport=udp",
+  iceCredentialMode: "認証方式",
+  iceModeStatic: "固定のユーザー名とパスワード",
+  iceModeRest: "coturn REST 共有シークレット",
+  iceUsername: "ユーザー名",
+  iceUsernamePlaceholder: "プロバイダーのユーザー名",
+  icePassword: "パスワード",
+  iceSharedSecret: "共有シークレット",
+  iceCredentialConfigured: "保存済み — 空欄なら変更しません",
+  iceCredentialPlaceholder: "プロバイダーの認証情報",
+  iceTtl: "有効期間（秒）",
+  iceStaticWarning: "固定の認証情報はすべての訪問者に配信され、再利用可能な中継アカウントを公開することになります。プロバイダーが他に手段を用意していない場合のみ使用し、クォータを設定してください。",
+  iceManagedHint: "アドレスはカンマ区切りで複数指定でき、合計 8 件までです。パスワードとシークレットは暗号化して保存され、ページには返されません。",
   accessMode: "ゲストアクセスモード",
   fixedMode: "この TeamSpeak サーバーのみ",
   openMode: "他の TeamSpeak サーバーを許可",
@@ -1008,7 +1120,38 @@ function mapRelayNodes(value: unknown): RelayNodeForm[] {
 function createRelayNode(): RelayNodeForm { return { id: `relay-new-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`, name: "", enabled: false, target: "", token: "", tokenAction: "replace", hasToken: false }; }
 function addRelayNode() { serverForm.relayNodes.push(createRelayNode()); serverForm.relaySettingsTouched = true; }
 function removeRelayNode(index: number) { serverForm.relayNodes.splice(index, 1); serverForm.relaySettingsTouched = true; }
-async function loadServerSettings() { const value = await getJson("/api/admin/server"); const target = splitTeamSpeakTarget(value.target); Object.assign(serverForm, value, { address: target.address, port: target.port, serverPassword: "", passwordAction: "keep", welcomeTextDe: String(value.welcomeTextDe || ""), welcomeTextRu: String(value.welcomeTextRu || ""), welcomeTextJa: String(value.welcomeTextJa || ""), welcomeDefaults: { ...DEFAULT_WELCOME_TEXTS, ...(value.welcomeDefaults && typeof value.welcomeDefaults === "object" ? value.welcomeDefaults : {}) }, webRtcEnabled: value.webRtcEnabled === true, webRtcUdpStart: Number(value.webRtcUdpStart || 40000), webRtcUdpEnd: Number(value.webRtcUdpEnd || 40099), relayConfigured: value.relayConfigured === true, relayEnabled: value.relayEnabled === true, relayName: String(value.relayName || ""), relayTarget: String(value.relayTarget || ""), relayToken: "", relayTokenAction: "keep", hasRelayToken: value.hasRelayToken === true, relaySettingsTouched: false, relayNodes: mapRelayNodes(value.relayNodes) }); }
+// ICE entries never come back with their credential: the server returns only
+// `hasCredential`, so a stored password is kept unless the admin explicitly
+// switches to "change" (same three-state contract as the relay token).
+function mapIceServers(value: unknown): IceServerForm[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const entry = item as { id?: unknown; kind?: unknown; urls?: unknown; credentialMode?: unknown; username?: unknown; hasCredential?: unknown; ttlSeconds?: unknown; enabled?: unknown };
+    if (typeof entry.id !== "string" || typeof entry.urls !== "string") return [];
+    const kind = entry.kind === "turn" ? "turn" : "stun";
+    const credentialMode = entry.credentialMode === "static" || entry.credentialMode === "rest" ? entry.credentialMode : "none";
+    return [{
+      id: entry.id,
+      kind,
+      urls: entry.urls,
+      credentialMode,
+      username: typeof entry.username === "string" ? entry.username : "",
+      credential: "",
+      credentialAction: "keep" as const,
+      hasCredential: entry.hasCredential === true,
+      ttlSeconds: Number(entry.ttlSeconds) || 1800,
+      enabled: entry.enabled === true,
+    }];
+  });
+}
+function createIceServer(): IceServerForm { return { id: `ice-new-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`, kind: "stun", urls: "", credentialMode: "none", username: "", credential: "", credentialAction: "replace", hasCredential: false, ttlSeconds: 1800, enabled: false }; }
+function addIceServer() { serverForm.iceServers.push(createIceServer()); }
+function removeIceServer(index: number) { serverForm.iceServers.splice(index, 1); }
+// A TURN entry cannot be credential-less (the server rejects it), so switching the
+// kind to TURN preselects the static scheme instead of leaving a form that fails on save.
+function handleIceKindChange(ice: IceServerForm) { if (ice.kind === "turn" && ice.credentialMode === "none") ice.credentialMode = "static"; }
+async function loadServerSettings() { const value = await getJson("/api/admin/server"); const target = splitTeamSpeakTarget(value.target); Object.assign(serverForm, value, { address: target.address, port: target.port, serverPassword: "", passwordAction: "keep", welcomeTextDe: String(value.welcomeTextDe || ""), welcomeTextRu: String(value.welcomeTextRu || ""), welcomeTextJa: String(value.welcomeTextJa || ""), welcomeDefaults: { ...DEFAULT_WELCOME_TEXTS, ...(value.welcomeDefaults && typeof value.welcomeDefaults === "object" ? value.welcomeDefaults : {}) }, webRtcEnabled: value.webRtcEnabled === true, webRtcUdpStart: Number(value.webRtcUdpStart || 40000), webRtcUdpEnd: Number(value.webRtcUdpEnd || 40099), relayConfigured: value.relayConfigured === true, relayEnabled: value.relayEnabled === true, relayName: String(value.relayName || ""), relayTarget: String(value.relayTarget || ""), relayToken: "", relayTokenAction: "keep", hasRelayToken: value.hasRelayToken === true, relaySettingsTouched: false, relayNodes: mapRelayNodes(value.relayNodes), iceServers: mapIceServers(value.iceServers) }); }
 async function loadOperations() { operationsLoading.value = true; try { const [sessions, invites, diagnostics, logs, audit] = await Promise.all([getJson("/api/admin/sessions"), getJson("/api/admin/invites"), getJson("/api/admin/diagnostics"), getJson("/api/admin/logs?limit=100"), getJson("/api/admin/audit?limit=50")]); operations.sessions = Array.isArray(sessions.sessions) ? sessions.sessions : []; operations.invites = Array.isArray(invites.invites) ? invites.invites : []; operations.diagnostics = { version: String(diagnostics.gateway?.version || ""), node: String(diagnostics.gateway?.node || ""), platform: String(diagnostics.gateway?.platform || ""), arch: String(diagnostics.gateway?.arch || ""), schemaVersion: Number(diagnostics.database?.schemaVersion || 0), createdSessions: Number(diagnostics.sessions?.created || 0) }; operations.logs = { available: Boolean(logs.available), entries: Array.isArray(logs.entries) ? logs.entries : [], sessions: Array.isArray(logs.sessions) ? logs.sessions : [] }; operations.audit = Array.isArray(audit.events) ? audit.events : []; } catch (error) { errorMessage.value = errorText((error as ApiError).code); } finally { operationsLoading.value = false; } }
 async function terminateSession(session: AdminSession) { if (!window.confirm(tr('confirmTerminate', { nickname: session.nickname }))) return; terminatingSession.value = session.id; errorMessage.value = ""; try { await sendJson(`/api/admin/sessions/${encodeURIComponent(session.id)}/terminate`, "POST", {}); await Promise.all([loadOperations(), loadOverview()]); } catch (error) { errorMessage.value = errorText((error as ApiError).code); } finally { terminatingSession.value = ""; } }
 async function createInvite() { submitting.value = true; errorMessage.value = ""; createdInvite.value = null; try { const result = await sendJson("/api/admin/invites", "POST", { channel: inviteForm.channel, expiresInHours: inviteForm.expiresInHours, maxUses: inviteForm.maxUses }); if (typeof result.token !== "string") throw new Error("INVITE_CREATE_FAILED"); createdInvite.value = { token: result.token, link: `${location.origin}/?invite=${encodeURIComponent(result.token)}` }; inviteForm.channel = ""; await loadOperations(); } catch (error) { errorMessage.value = errorText((error as ApiError).code); } finally { submitting.value = false; } }
@@ -1016,11 +1159,11 @@ async function revokeInvite(invite: ManagedInvite) { if (!window.confirm(tr('con
 async function copyInviteLink() { if (!createdInvite.value) return; try { await navigator.clipboard.writeText(createdInvite.value.link); showOperationNotice(tr('copiedLink')); } catch { errorMessage.value = tr('operationFailed'); } }
 function showOperationNotice(message: string) { errorMessage.value = message; window.setTimeout(() => { if (errorMessage.value === message) errorMessage.value = ""; }, 2200); }
 async function downloadBackup() { try { const response = await fetch("/api/admin/backup", { headers: { accept: "application/octet-stream" } }); if (!response.ok) throw new Error("BACKUP_FAILED"); const blob = await response.blob(); const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = `webspeak-backup-${new Date().toISOString().slice(0, 10)}.db`; anchor.click(); URL.revokeObjectURL(url); await loadOperations(); } catch (error) { errorMessage.value = errorText((error as ApiError).code); } }
-async function saveServerSettings() { submitting.value = true; errorMessage.value = ""; try { const result = await sendJson("/api/admin/server", "PUT", serverPayload()); const target = splitTeamSpeakTarget(result.settings?.target); Object.assign(serverForm, result.settings, { address: target.address, port: target.port, serverPassword: "", passwordAction: "keep", welcomeTextDe: String(result.settings.welcomeTextDe || ""), welcomeTextRu: String(result.settings.welcomeTextRu || ""), welcomeTextJa: String(result.settings.welcomeTextJa || ""), welcomeDefaults: { ...DEFAULT_WELCOME_TEXTS, ...(result.settings.welcomeDefaults && typeof result.settings.welcomeDefaults === "object" ? result.settings.welcomeDefaults : {}) }, webRtcEnabled: result.settings.webRtcEnabled === true, webRtcUdpStart: Number(result.settings.webRtcUdpStart || 40000), webRtcUdpEnd: Number(result.settings.webRtcUdpEnd || 40099), relayConfigured: result.settings.relayConfigured === true, relayEnabled: result.settings.relayEnabled === true, relayName: String(result.settings.relayName || ""), relayTarget: String(result.settings.relayTarget || ""), relayToken: "", relayTokenAction: "keep", hasRelayToken: result.settings.hasRelayToken === true, relaySettingsTouched: false, relayNodes: mapRelayNodes(result.settings.relayNodes) }); await loadOverview(); } catch (error) { errorMessage.value = errorText((error as ApiError).code); } finally { submitting.value = false; } }
+async function saveServerSettings() { submitting.value = true; errorMessage.value = ""; try { const result = await sendJson("/api/admin/server", "PUT", serverPayload()); const target = splitTeamSpeakTarget(result.settings?.target); Object.assign(serverForm, result.settings, { address: target.address, port: target.port, serverPassword: "", passwordAction: "keep", welcomeTextDe: String(result.settings.welcomeTextDe || ""), welcomeTextRu: String(result.settings.welcomeTextRu || ""), welcomeTextJa: String(result.settings.welcomeTextJa || ""), welcomeDefaults: { ...DEFAULT_WELCOME_TEXTS, ...(result.settings.welcomeDefaults && typeof result.settings.welcomeDefaults === "object" ? result.settings.welcomeDefaults : {}) }, webRtcEnabled: result.settings.webRtcEnabled === true, webRtcUdpStart: Number(result.settings.webRtcUdpStart || 40000), webRtcUdpEnd: Number(result.settings.webRtcUdpEnd || 40099), relayConfigured: result.settings.relayConfigured === true, relayEnabled: result.settings.relayEnabled === true, relayName: String(result.settings.relayName || ""), relayTarget: String(result.settings.relayTarget || ""), relayToken: "", relayTokenAction: "keep", hasRelayToken: result.settings.hasRelayToken === true, relaySettingsTouched: false, relayNodes: mapRelayNodes(result.settings.relayNodes), iceServers: mapIceServers(result.settings.iceServers) }); await loadOverview(); } catch (error) { errorMessage.value = errorText((error as ApiError).code); } finally { submitting.value = false; } }
 function handleWebRtcToggle() { if (serverForm.webRtcEnabled) webrtcPortNoticeOpen.value = true; }
 async function testServerConnection() { await runTest("/api/admin/server/test", { target: combineTeamSpeakTarget(serverForm.address, serverForm.port), serverPassword: serverForm.passwordAction === "replace" ? serverForm.serverPassword : undefined, passwordAction: serverForm.passwordAction }); if (testResult.value) { await loadOverview(); serverForm.lastTestAt = new Date().toISOString(); serverForm.lastTestLatencyMs = testResult.value.ok ? (testResult.value.latencyMs ?? null) : null; } }
 function touchRelaySettings() { serverForm.relaySettingsTouched = true; }
-function serverPayload() { return { target: combineTeamSpeakTarget(serverForm.address, serverForm.port), serverPassword: serverForm.passwordAction === "replace" ? serverForm.serverPassword : undefined, passwordAction: serverForm.passwordAction, accessMode: serverForm.accessMode, siteName: serverForm.siteName, welcomeText: serverForm.welcomeText, welcomeTextEn: serverForm.welcomeTextEn, welcomeTextDe: serverForm.welcomeTextDe, welcomeTextRu: serverForm.welcomeTextRu, welcomeTextJa: serverForm.welcomeTextJa, webRtcEnabled: serverForm.webRtcEnabled, webRtcUdpStart: serverForm.webRtcUdpStart, webRtcUdpEnd: serverForm.webRtcUdpEnd, relayNodes: serverForm.relayNodes.map((node) => ({ id: node.id, name: node.name, target: node.target, enabled: node.enabled, tokenAction: node.tokenAction, ...(node.tokenAction === "replace" ? { token: node.token } : {}) })) }; }
+function serverPayload() { return { target: combineTeamSpeakTarget(serverForm.address, serverForm.port), serverPassword: serverForm.passwordAction === "replace" ? serverForm.serverPassword : undefined, passwordAction: serverForm.passwordAction, accessMode: serverForm.accessMode, siteName: serverForm.siteName, welcomeText: serverForm.welcomeText, welcomeTextEn: serverForm.welcomeTextEn, welcomeTextDe: serverForm.welcomeTextDe, welcomeTextRu: serverForm.welcomeTextRu, welcomeTextJa: serverForm.welcomeTextJa, webRtcEnabled: serverForm.webRtcEnabled, webRtcUdpStart: serverForm.webRtcUdpStart, webRtcUdpEnd: serverForm.webRtcUdpEnd, relayNodes: serverForm.relayNodes.map((node) => ({ id: node.id, name: node.name, target: node.target, enabled: node.enabled, tokenAction: node.tokenAction, ...(node.tokenAction === "replace" ? { token: node.token } : {}) })), iceServers: serverForm.iceServers.map((ice) => ({ id: ice.id, kind: ice.kind, urls: ice.urls, credentialMode: ice.credentialMode, username: ice.username, enabled: ice.enabled, ttlSeconds: ice.ttlSeconds, credentialAction: ice.credentialAction, ...(ice.credentialAction === "replace" ? { credential: ice.credential } : {}) })) }; }
 async function runTest(url: string, body: Record<string, unknown>) { testing.value = true; errorMessage.value = ""; testResult.value = null; try { testResult.value = await sendJson(url, "POST", body, url.includes("/server/test")); } catch (error) { testResult.value = { ok: false, code: (error as ApiError).code }; } finally { testing.value = false; } }
 async function dismissLegacyNotice() { await sendJson("/api/admin/legacy-import/dismiss", "POST", {}); overview.legacyConfigImported = false; }
 function persistLanguage() { localStorage.setItem("webspeak:language", language.value); }
@@ -1068,6 +1211,68 @@ function errorText(code?: string) {
     INVALID_RELAY_TOKEN: { zh: "启用中继时必须填写令牌。", en: "A relay token is required when the relay is enabled.", de: "Beim Aktivieren des Relays ist ein Token erforderlich." },
   };
   if (relayErrors[code || ""]) return relayErrors[code || ""][locale];
+  // ICE errors carry all five languages: unlike the relay map above (zh/en/de,
+  // which predates the ru/ja locales) there is no reason to ship a new map that
+  // silently falls back to English for two of the supported languages.
+  const iceErrors: Record<string, Record<Language, string>> = {
+    INVALID_ICE_URLS: {
+      zh: "ICE 地址无效：必须以 stun:/stuns:/turn:/turns: 开头，端口 1–65535 且不能是 53，turns: 不能带 transport=udp。",
+      en: "An ICE address is invalid: it must start with stun:/stuns:/turn:/turns:, use port 1–65535 (not 53), and turns: must not carry transport=udp.",
+      de: "Eine ICE-Adresse ist ungültig: Sie muss mit stun:/stuns:/turn:/turns: beginnen, Port 1–65535 nutzen (nicht 53), und turns: darf kein transport=udp tragen.",
+      ru: "Некорректный ICE-адрес: должен начинаться с stun:/stuns:/turn:/turns:, использовать порт 1–65535 (не 53), а turns: не может содержать transport=udp.",
+      ja: "ICE アドレスが不正です。stun:/stuns:/turn:/turns: で始まり、ポートは 1〜65535（53 は不可）、turns: に transport=udp は指定できません。",
+    },
+    INVALID_ICE_CREDENTIAL: {
+      zh: "ICE 凭据无效：静态凭据需要密码，coturn REST 的共享密钥至少 16 个字符。",
+      en: "An ICE credential is invalid: a static entry needs a password, and a coturn REST shared secret needs at least 16 characters.",
+      de: "Zugangsdatum ungültig: Ein statischer Eintrag braucht ein Passwort, ein coturn-REST-Shared-Secret mindestens 16 Zeichen.",
+      ru: "Некорректные учётные данные: для статической записи нужен пароль, а общий секрет coturn REST — не короче 16 символов.",
+      ja: "認証情報が不正です。固定認証にはパスワード、coturn REST の共有シークレットには 16 文字以上が必要です。",
+    },
+    INVALID_ICE_CREDENTIAL_MODE: {
+      zh: "TURN 条目必须选择静态凭据或 coturn REST 共享密钥。",
+      en: "A TURN entry must use either a static credential or a coturn REST shared secret.",
+      de: "Ein TURN-Eintrag braucht entweder statische Zugangsdaten oder ein coturn-REST-Shared-Secret.",
+      ru: "Для записи TURN нужно выбрать статические учётные данные или общий секрет coturn REST.",
+      ja: "TURN の項目には固定の認証情報か coturn REST 共有シークレットのいずれかが必要です。",
+    },
+    INVALID_ICE_USERNAME: {
+      zh: "静态凭据需要 1–512 个字符的用户名。",
+      en: "A static credential needs a username of 1–512 characters.",
+      de: "Statische Zugangsdaten brauchen einen Benutzernamen mit 1–512 Zeichen.",
+      ru: "Для статических учётных данных нужно имя пользователя длиной 1–512 символов.",
+      ja: "固定認証には 1〜512 文字のユーザー名が必要です。",
+    },
+    INVALID_ICE_TTL: {
+      zh: "凭据有效期必须是 60–86400 之间的整数。",
+      en: "The credential lifetime must be an integer between 60 and 86400.",
+      de: "Die Gültigkeitsdauer muss eine ganze Zahl zwischen 60 und 86400 sein.",
+      ru: "Срок действия должен быть целым числом от 60 до 86400.",
+      ja: "有効期間は 60〜86400 の整数で指定してください。",
+    },
+    TOO_MANY_ICE_SERVERS: {
+      zh: "ICE 条目过多：下发到浏览器的最多 8 条（STUN 每条地址算一条）。",
+      en: "Too many ICE entries: at most 8 may reach a browser (each STUN address counts as one).",
+      de: "Zu viele ICE-Einträge: höchstens 8 erreichen einen Browser (jede STUN-Adresse zählt einzeln).",
+      ru: "Слишком много записей ICE: до браузера доходит не более 8 (каждый STUN-адрес считается отдельно).",
+      ja: "ICE の項目が多すぎます。ブラウザに届くのは最大 8 件です（STUN はアドレスごとに 1 件）。",
+    },
+    INVALID_ICE_ID: {
+      zh: "ICE 条目标识重复。",
+      en: "ICE entry identifiers must be unique.",
+      de: "ICE-Eintrags-IDs müssen eindeutig sein.",
+      ru: "Идентификаторы записей ICE должны быть уникальными.",
+      ja: "ICE 項目の識別子が重複しています。",
+    },
+    INVALID_ICE_SERVERS: {
+      zh: "ICE 配置格式无效。",
+      en: "The ICE configuration is malformed.",
+      de: "Die ICE-Konfiguration ist fehlerhaft.",
+      ru: "Конфигурация ICE имеет неверный формат.",
+      ja: "ICE 設定の形式が正しくありません。",
+    },
+  };
+  if (iceErrors[code || ""]) return iceErrors[code || ""][language.value];
   const probe: Record<string, { zh: string; en: string; de: string }> = {
     INVALID_TARGET: { zh: "TeamSpeak 服务器地址格式无效。", en: "The TeamSpeak server address is invalid.", de: "Die TeamSpeak-Serveradresse ist ungültig." },
     PING_UNAVAILABLE: { zh: "当前运行环境没有可用的 ICMP Ping 工具。", en: "The runtime does not provide an ICMP ping tool.", de: "In der Laufzeitumgebung ist kein ICMP-Ping-Tool verfügbar." },
@@ -1249,6 +1454,9 @@ async function parseResponse(response: Response) { const value = await response.
 .relay-fields{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .relay-fields .password-row{grid-column:1 / -1}
 .relay-card .field-help{line-height:1.55}
+/* 静态凭据等于公开一个可复用的中继账号，这条提示不能只是灰字小字。 */
+.ice-warning{grid-column:1 / -1;margin-top:0;padding:7px 9px;color:#8b6a3e;background:#fbf1dc;border-radius:7px;font-size:10px;line-height:1.5}
+:global(html[data-theme="dark"] .ice-warning){color:#e8c98a;background:#332c1c}
 .welcome-editor{display:grid;gap:10px;padding:12px;background:#f6f9f8;border:1px solid #e4efeb;border-radius:10px}
 .welcome-editor-heading{display:grid;grid-template-columns:minmax(0,1fr) minmax(180px,1fr);align-items:end;gap:12px}
 .welcome-editor-heading label{min-width:0}

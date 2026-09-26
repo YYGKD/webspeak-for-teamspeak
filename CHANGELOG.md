@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.2.6] — 2026-09-26
+
+### 中文
+
+- 新增**管理后台可配置的 STUN / 外部 TURN**：在管理控制台的服务器设置里直接维护 ICE 服务器列表（STUN 与 TURN 可并存），不再需要改 systemd unit 或环境变量。支持两类 TURN 凭据：**静态用户名/密码**（第三方 TURN 服务常见形式）与 **coturn REST 共享密钥**（密钥留在服务端，每次页面加载签发一份短期临时凭据）。配置存在数据库里，密码与共享密钥以 AES-256-GCM 密文保存，接口只返回「是否已保存」，明文永不回传页面；每次变更写入 `ICE_SERVERS_CHANGED` 审计事件。
+- 配置优先级：管理后台列表非空时以其为准；列表为空则回退到原有环境变量（`WEBSPEAK_STUN_URLS` / `WEBSPEAK_TURN_URLS` / `WEBSPEAK_TURN_SECRET` / `WEBSPEAK_TURN_TTL_SECONDS`），因此**升级后既有部署行为完全不变**，无需改动任何服务器配置。语音与屏幕共享共用同一份解析结果，不会出现两条链路配置不一致。
+- 保存时严格校验并**拒绝**而非静默丢弃：地址必须以 `stun:`/`stuns:`/`turn:`/`turns:` 开头、端口 1–65535 且禁用 53（浏览器会屏蔽）、`turns:` 不允许 `transport=udp`、TURN 条目必须选择凭据方式、展开后下发到浏览器的最多 8 条（与屏幕共享侧既有上限一致）。
+- 数据库 schema 升级到 v8（新增 `ice_servers` 表），迁移前自动生成 `.schema-7.bak` 快照。
+- 新增 `scripts/ice-config-test.mjs`（36 项断言）：静态与临时凭据派生、环境变量回退、加密存储与视图脱敏、全部校验拒绝路径、v7→v8 迁移；`npm test` 现为 9 个套件。
+
+### English
+
+- Added **admin-console-configurable STUN / external TURN**: maintain the ICE server list (STUN and TURN side by side) in the console's server settings, with no need to touch the systemd unit or environment variables. Two TURN credential schemes are supported: **static username/password** (what third-party TURN services hand out) and the **coturn REST shared secret** (the secret stays on the server and a fresh short-lived credential is issued on every page load). Entries live in the database; passwords and shared secrets are stored as AES-256-GCM ciphertext, the API returns only “stored or not”, and plaintext never travels back to the browser. Every change writes an `ICE_SERVERS_CHANGED` audit event.
+- Precedence: a non-empty console list wins; an empty list falls back to the existing environment variables (`WEBSPEAK_STUN_URLS` / `WEBSPEAK_TURN_URLS` / `WEBSPEAK_TURN_SECRET` / `WEBSPEAK_TURN_TTL_SECONDS`), so **an upgrade changes nothing for an existing deployment** and no server configuration has to be edited. Voice and screen sharing resolve to the same list, so the two paths cannot disagree.
+- Saving validates strictly and **rejects** instead of silently dropping: addresses must start with `stun:`/`stuns:`/`turn:`/`turns:`, use port 1–65535 and not port 53 (browsers block it), `turns:` must not request `transport=udp`, a TURN entry must choose a credential scheme, and at most 8 entries may reach a browser (the ceiling the screen-share path already enforced).
+- Database schema moves to v8 (new `ice_servers` table); a `.schema-7.bak` snapshot is written before the migration.
+- Added `scripts/ice-config-test.mjs` (36 assertions): static vs. ephemeral credential derivation, the environment fallback, encrypted storage and redacted views, every rejection path and the v7→v8 migration. `npm test` now runs 9 suites.
+
+### Deutsch
+
+- **In der Admin-Konsole konfigurierbares STUN / externes TURN**: Die ICE-Serverliste (STUN und TURN nebeneinander) wird direkt in den Servereinstellungen der Konsole gepflegt – ohne systemd-Unit oder Umgebungsvariablen anzufassen. Zwei TURN-Anmeldeverfahren werden unterstützt: **statischer Benutzername/Passwort** (was Drittanbieter ausgeben) und das **coturn-REST-Shared-Secret** (das Secret bleibt auf dem Server, pro Seitenaufruf wird ein kurzlebiges Zugangsdatum ausgestellt). Die Einträge liegen in der Datenbank; Passwörter und Secrets werden als AES-256-GCM-Chiffrat gespeichert, die API liefert nur „gespeichert oder nicht“, Klartext gelangt nie zurück in den Browser. Jede Änderung schreibt ein `ICE_SERVERS_CHANGED`-Audit-Ereignis.
+- Vorrang: Eine nicht leere Liste in der Konsole gewinnt; eine leere Liste fällt auf die bestehenden Umgebungsvariablen zurück (`WEBSPEAK_STUN_URLS` / `WEBSPEAK_TURN_URLS` / `WEBSPEAK_TURN_SECRET` / `WEBSPEAK_TURN_TTL_SECONDS`) – **ein Upgrade ändert für ein bestehendes Deployment nichts**, es muss keine Serverkonfiguration angepasst werden. Sprache und Bildschirmfreigabe nutzen dieselbe Liste, ein Auseinanderlaufen ist ausgeschlossen.
+- Beim Speichern wird streng geprüft und **abgelehnt** statt still verworfen: Adressen müssen mit `stun:`/`stuns:`/`turn:`/`turns:` beginnen, Port 1–65535 nutzen und nicht Port 53 (von Browsern blockiert), `turns:` darf kein `transport=udp` anfordern, ein TURN-Eintrag muss ein Anmeldeverfahren wählen, und höchstens 8 Einträge erreichen einen Browser (dieselbe Obergrenze wie beim Bildschirmfreigabe-Pfad).
+- Das Datenbankschema steigt auf v8 (neue Tabelle `ice_servers`); vor der Migration wird ein `.schema-7.bak`-Schnappschuss geschrieben.
+- `scripts/ice-config-test.mjs` hinzugefügt (36 Assertions): statische vs. kurzlebige Anmeldedaten, der Umgebungs-Fallback, verschlüsselte Speicherung und redigierte Ansichten, alle Ablehnungspfade und die Migration v7→v8. `npm test` führt jetzt 9 Suiten aus.
+
+### Русский
+
+- **Настраиваемые в админ-консоли STUN / внешний TURN**: список ICE-серверов (STUN и TURN вместе) ведётся прямо в настройках сервера в консоли — без правки systemd-юнита и переменных окружения. Поддерживаются две схемы аутентификации TURN: **статическое имя пользователя и пароль** (то, что выдают сторонние сервисы) и **общий секрет coturn REST** (секрет остаётся на сервере, а при каждой загрузке страницы выдаются свежие краткосрочные учётные данные). Записи хранятся в базе; пароли и секреты — в виде шифртекста AES-256-GCM, API возвращает только «сохранено или нет», открытый текст никогда не попадает обратно в браузер. Каждое изменение пишет событие аудита `ICE_SERVERS_CHANGED`.
+- Приоритет: непустой список в консоли имеет приоритет; пустой список откатывается к существующим переменным окружения (`WEBSPEAK_STUN_URLS` / `WEBSPEAK_TURN_URLS` / `WEBSPEAK_TURN_SECRET` / `WEBSPEAK_TURN_TTL_SECONDS`), поэтому **обновление ничего не меняет для существующего развёртывания** и не требует правки конфигурации сервера. Голос и демонстрация экрана используют один и тот же список — расхождение между ними исключено.
+- При сохранении выполняется строгая проверка и **отказ** вместо тихого отбрасывания: адрес должен начинаться с `stun:`/`stuns:`/`turn:`/`turns:`, использовать порт 1–65535 и не порт 53 (браузеры его блокируют), `turns:` не должен запрашивать `transport=udp`, для записи TURN нужно выбрать схему аутентификации, а до браузера доходит не более 8 записей (тот же предел, что и в пути демонстрации экрана).
+- Схема базы данных обновлена до v8 (новая таблица `ice_servers`); перед миграцией создаётся снимок `.schema-7.bak`.
+- Добавлен `scripts/ice-config-test.mjs` (36 проверок): статические и краткосрочные учётные данные, откат к переменным окружения, шифрованное хранение и обезличенные представления, все пути отказа и миграция v7→v8. `npm test` теперь запускает 9 наборов.
+
+### 日本語
+
+- **管理コンソールで設定できる STUN / 外部 TURN**：ICE サーバー一覧（STUN と TURN を併記可）をコンソールのサーバー設定で直接管理でき、systemd ユニットや環境変数を触る必要がありません。TURN の認証方式は 2 種類に対応：**固定のユーザー名とパスワード**（サードパーティ製 TURN サービスが発行する形式）と **coturn REST 共有シークレット**（シークレットはサーバーに留め、ページ読み込みごとに短命な認証情報を発行）。設定はデータベースに保存され、パスワードとシークレットは AES-256-GCM の暗号文として保持、API は「保存済みかどうか」のみを返し、平文がブラウザに戻ることはありません。変更のたびに `ICE_SERVERS_CHANGED` の監査イベントを記録します。
+- 優先順位：コンソールの一覧が空でなければそれを採用し、空なら既存の環境変数（`WEBSPEAK_STUN_URLS` / `WEBSPEAK_TURN_URLS` / `WEBSPEAK_TURN_SECRET` / `WEBSPEAK_TURN_TTL_SECONDS`）にフォールバックします。したがって**アップグレードしても既存のデプロイの挙動は変わらず**、サーバー設定の変更も不要です。音声と画面共有は同じ解決結果を使うため、両者が食い違うことはありません。
+- 保存時は厳格に検証し、黙って捨てずに**拒否**します：アドレスは `stun:`/`stuns:`/`turn:`/`turns:` で始まり、ポートは 1〜65535（53 はブラウザが遮断するため不可）、`turns:` に `transport=udp` は指定不可、TURN の項目は認証方式の選択が必須、ブラウザに届くのは最大 8 件（画面共有側と同じ上限）。
+- データベーススキーマを v8 に更新（`ice_servers` テーブルを追加）。移行前に `.schema-7.bak` スナップショットを作成します。
+- `scripts/ice-config-test.mjs`（36 件のアサーション）を追加：固定／短命な認証情報の生成、環境変数へのフォールバック、暗号化保存とマスクされた表示、すべての拒否パス、v7→v8 移行をカバー。`npm test` は 9 スイートになりました。
+
 ## [0.2.5] — 2026-09-26
 
 ### 中文
