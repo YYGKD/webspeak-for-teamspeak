@@ -18,6 +18,9 @@
 本衍生版本与上游一致，按 **GNU Affero General Public License v3.0 only**（AGPL-3.0-only）分发，
 许可证全文见 [`LICENSE`](./LICENSE)。上游作品的版权归其原作者所有。
 
+上游项目由 `EchoSixHIYA` 及其贡献者共同开发（例如 `LainHE` 的 PR #2「浏览器端报错翻译与提示改造」等），
+相关版权归其各自作者所有；本仓库的 Git 历史完整保留了这些提交与署名。
+
 由于 WebSpeak 是**通过网络向用户提供服务**的软件，按 AGPL-3.0 §13，向使用者提供本服务的实例必须
 同时向他们提供本衍生版本的完整对应源代码——本仓库即为该源码。
 
@@ -43,6 +46,10 @@ encoding), and a number of bug fixes.
 Like the upstream project, this derivative is distributed under the
 **GNU Affero General Public License v3.0 only** (AGPL-3.0-only); see [`LICENSE`](./LICENSE).
 Copyright of the upstream work remains with its original authors.
+
+The upstream project was developed by `EchoSixHIYA` and its contributors (for example `LainHE`'s
+PR #2, "browser-side error translation and messaging rework"). Copyright remains with the respective
+authors, and this repository's Git history preserves those commits and their attribution.
 
 Because WebSpeak is software **offered to users over a network**, AGPL-3.0 §13 requires an instance
 serving this derivative to offer those users the complete corresponding source code — this repository

@@ -131,12 +131,6 @@ npm start
 - 保存したブラウザ ID は同じブラウザで同時に1接続だけ使用できます。
 - BGM共有はデスクトップのみで、WebRTC が必要です。
 
-## コミュニティと関連プロジェクト
-
-- [QQ グループ](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=yhumUMDD9PmyYFWdXWUb_x7hM5trFQY8&authKey=Pw3HBGT7GwMinTQnuFGfnpf0aRSzXOJKcAiujVP1%2BXMpjheAKrncTRivicBJxpjV&noverify=0&group_code=869500475)
-- [Telegram グループ](https://t.me/+8qShpTcuN9A3MWY9)
-- [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot) — Web コンソール付き TeamSpeak 音楽ボット。
-
 ## 🧾 更新履歴
 
 | バージョン | 内容 |

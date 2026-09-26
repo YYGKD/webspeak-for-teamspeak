@@ -131,12 +131,6 @@ npm start
 - Одна сохранённая браузерная идентичность может использоваться только одним активным подключением.
 - Фоновая музыка доступна только на компьютере и требует WebRTC.
 
-## Сообщество и проекты
-
-- [QQ-группа](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=yhumUMDD9PmyYFWdXWUb_x7hM5trFQY8&authKey=Pw3HBGT7GwMinTQnuFGfnpf0aRSzXOJKcAiujVP1%2BXMpjheAKrncTRivicBJxpjV&noverify=0&group_code=869500475)
-- [Telegram-группа](https://t.me/+8qShpTcuN9A3MWY9)
-- [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot) — музыкальный бот для TeamSpeak с веб-консолью.
-
 ## 🧾 История изменений
 
 | Версия | Изменения |

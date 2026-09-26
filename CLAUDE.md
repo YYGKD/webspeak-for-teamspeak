@@ -85,7 +85,10 @@ node dist/index.js
 Media worker binaries are vendored under `vendor/mediasoup-worker/` and verified by `node scripts/verify-worker.mjs` (sha256 vs `SHA256SUMS`). Docker and CI run that check; never let mediasoup fall back to downloading a worker at runtime.
 
 ## Git
-- Remote: `https://github.com/EchoSixHIYA/web-client-for-TeamSpeak`
+- `origin` — `https://github.com/YYGKD/webspeak-for-teamspeak` (this project's own repo; push here)
+- `upstream` — `https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak` (the project this one derives from; `git fetch upstream && git merge upstream/master` to sync)
+- GitHub access from this machine goes through a local proxy: `git config --global http.https://github.com.proxy http://127.0.0.1:6666`
+- Attribution/licensing: derivative work under AGPL-3.0-only — see `NOTICE` (upstream baseline is tagged `upstream-v0.2.4`)
 - `webspeak-update.tar.gz` is in .gitignore (deployment artifact)
 - No secrets in source; config.json is gitignored
 

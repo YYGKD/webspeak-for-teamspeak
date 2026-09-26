@@ -8,16 +8,16 @@
   <p><strong>让 TeamSpeak 自然地进入浏览器。</strong></p>
   <p>A self-hosted browser voice client for TeamSpeak 3 and TeamSpeak 6.</p>
 
-  [![Latest Release](https://img.shields.io/github/v/release/EchoSixHIYA/WebSpeak-client-for-TeamSpeak?sort=semver&display_name=tag&style=flat-square&color=0f766e)](https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak/releases/latest)
-  [![Docker Image](https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak/actions/workflows/docker-publish.yml/badge.svg?branch=master)](https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak/actions/workflows/docker-publish.yml)
+  [![Latest Release](https://img.shields.io/github/v/release/YYGKD/webspeak-for-teamspeak?sort=semver&display_name=tag&style=flat-square&color=0f766e)](https://github.com/YYGKD/webspeak-for-teamspeak/releases/latest)
+  [![Docker Image](https://github.com/YYGKD/webspeak-for-teamspeak/actions/workflows/docker-publish.yml/badge.svg?branch=master)](https://github.com/YYGKD/webspeak-for-teamspeak/actions/workflows/docker-publish.yml)
   [![License](https://img.shields.io/badge/license-AGPL--3.0--only-0f766e?style=flat-square)](./LICENSE)
-  [![GitHub Stars](https://img.shields.io/github/stars/EchoSixHIYA/WebSpeak-client-for-TeamSpeak?style=flat-square&logo=github&color=0f766e)](https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak/stargazers)
+  [![GitHub Stars](https://img.shields.io/github/stars/YYGKD/webspeak-for-teamspeak?style=flat-square&logo=github&color=0f766e)](https://github.com/YYGKD/webspeak-for-teamspeak/stargazers)
   <br />
   [![TeamSpeak](https://img.shields.io/badge/TeamSpeak-3%20%7C%206-2580C3?style=flat-square)](https://www.teamspeak.com/)
   [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.5-339933?style=flat-square&logo=nodedotjs&logoColor=white)](https://nodejs.org/)
   [![Vue](https://img.shields.io/badge/Vue-3-42B883?style=flat-square&logo=vuedotjs&logoColor=white)](https://vuejs.org/)
   [![TypeScript](https://img.shields.io/badge/TypeScript-6-3178C6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-  [![Docker](https://img.shields.io/badge/Docker-GHCR-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/EchoSixHIYA/packages/container/package/webspeak)
+  [![Docker](https://img.shields.io/badge/Docker-GHCR-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/YYGKD/packages/container/package/webspeak)
 
   <p>
     <a href="./docs/README.zh-CN.md">简体中文文档</a> ·
@@ -61,36 +61,6 @@
 - [Русский](./docs/README.ru.md)
 - [日本語](./docs/README.ja.md)
 
-## 社区 · Community
-
-<div align="center">
-
-<a href="http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=yhumUMDD9PmyYFWdXWUb_x7hM5trFQY8&authKey=Pw3HBGT7GwMinTQnuFGfnpf0aRSzXOJKcAiujVP1%2BXMpjheAKrncTRivicBJxpjV&noverify=0&group_code=869500475">
-  <img src="./web/public/qq-group-qr.jpg" alt="WebSpeak QQ 群二维码" width="290" />
-</a>
-
-**QQ群 / QQ group：`869500475`**
-
-[通过群聊链接直接加入 / Join directly](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=yhumUMDD9PmyYFWdXWUb_x7hM5trFQY8&authKey=Pw3HBGT7GwMinTQnuFGfnpf0aRSzXOJKcAiujVP1%2BXMpjheAKrncTRivicBJxpjV&noverify=0&group_code=869500475)
-
-[Telegram 群组 / Telegram group](https://t.me/+8qShpTcuN9A3MWY9)
-
-</div>
-
-## 友链项目 · Friend projects
-
-### [NeteaseTSBot](https://github.com/yichen11818/NeteaseTSBot)
-
-面向 TeamSpeak 3/6 的多平台音乐点播机器人，支持网易云音乐、QQ 音乐和 Bilibili 音频播放，并提供 Web 控制台。<br />
-A multi-platform music bot for TeamSpeak 3/6 with Netease Cloud Music, QQ Music, and Bilibili playback, plus a web console.<br />
-Ein plattformübergreifender Musikbot für TeamSpeak 3/6 mit Netease Cloud Music, QQ Music und Bilibili sowie Webkonsole.
-
-## Contributors · 贡献者
-
-感谢提交 PR 的贡献者：
-
-- [LainHE](https://github.com/LainHE) — [PR #2](https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak/pull/2)：浏览器端报错翻译与提示改造。
-
 ## 许可证 · License · Lizenz · Лицензия · ライセンス
 
 WebSpeak 使用 [GNU Affero General Public License v3.0 only](./LICENSE) 发布。你可以使用、研究、修改和再分发本项目；如果修改后的版本通过网络向用户提供服务，需要按照 AGPL-3.0 向这些用户提供对应源代码。
@@ -108,11 +78,5 @@ WebSpeak は [GNU Affero General Public License v3.0 only](./LICENSE) の下で�
 本仓库是 [`EchoSixHIYA/WebSpeak-client-for-TeamSpeak`](https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak) 的**衍生版本**，上游基线为 `v0.2.4`（本仓库标签 `upstream-v0.2.4`）。自 `v0.2.5` 起对源码所作的修改及日期，记录在 [`CHANGELOG.md`](./CHANGELOG.md)；完整声明见 [`NOTICE`](./NOTICE)。
 
 This repository is a **derivative** of [`EchoSixHIYA/WebSpeak-client-for-TeamSpeak`](https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak), based on upstream `v0.2.4` (tagged `upstream-v0.2.4` here). Changes made to the source since `v0.2.5`, and their dates, are recorded in [`CHANGELOG.md`](./CHANGELOG.md); see [`NOTICE`](./NOTICE) for the full statement.
-
-## Star History
-
-<a href="https://star-history.com/#EchoSixHIYA/WebSpeak-client-for-TeamSpeak&Date">
-  <img src="https://api.star-history.com/svg?repos=EchoSixHIYA/WebSpeak-client-for-TeamSpeak&type=Date" alt="WebSpeak Star History" width="100%" />
-</a>
 
 <div align="right"><a href="#readme-top">返回顶部 · Back to top ↑</a></div>
