@@ -1020,7 +1020,17 @@ export class VoiceBridge {
         if (info.targetChannelID === undefined || info.targetChannelID === 0n) return;
         this.reconcileScreenShareAfterClientMove(entry!, info.id, info.targetChannelID);
         const movedMember = entry!.members.get(info.id);
-        if (info.id === selfId) selfChannelId = info.targetChannelID;
+        if (info.id === selfId) {
+          selfChannelId = info.targetChannelID;
+          // 自身入频/换频道后必须重推频道内已有的屏幕共享列表。
+          // 初次连接的时序是「发 connected → 前端请求 screenShareList → 才执行 ensureChannel()」，
+          // 前端那次请求读到的还是入频前的频道，只会拿到空列表；若不在此处补推，
+          // 后进入频道的用户就永远看不到已经开始的屏幕共享。
+          sendJson({
+            type: "screenShareList",
+            streams: this.screenStreamsForChannel(teamSpeakTargetKey(entry!.target), info.targetChannelID),
+          });
+        }
         directory.applyClientMoved(info.id, info.targetChannelID);
         refreshDirectory();
         if (tsReady && initialStateSent) {
@@ -1719,6 +1729,18 @@ export class VoiceBridge {
       // H1/R6：定向态应答——仅此处惰性 pipe 并填充请求者专属的管道 Producer ID。
       // 发起端未推流时字段缺省，观众进入等待态，待 screenShareProducers 推送补齐。
       const viewerStream = await this.describeScreenStreamForViewer(stream, entry.id);
+      // 观测点：观众加入的 pipe 结果（诊断"新观众看不到直播"类问题）。
+      this.logger.info(
+        {
+          streamId: stream.streamId,
+          viewerEntryId: entry.id,
+          alreadyJoined,
+          viewerCount: stream.viewerCount,
+          videoProducerId: viewerStream.videoProducerId ?? null,
+          audioProducerId: viewerStream.audioProducerId ?? null,
+        },
+        "屏幕共享观众加入",
+      );
       sendJson({
         type: "screenShareJoined",
         requestId: message.requestId,
@@ -1749,10 +1771,39 @@ export class VoiceBridge {
   }
 
   private listScreenStreamsFor(entry: WebClientEntry): ScreenShareStreamDescription[] {
-    const targetKey = teamSpeakTargetKey(entry.target);
+    return this.screenStreamsForChannel(teamSpeakTargetKey(entry.target), entry.tsClient.getChannelId());
+  }
+
+  /**
+   * 指定频道内当前屏幕共享的**广播态**列表（不含 producer 字段、不触发任何 pipe）。
+   *
+   * 显式接收 `channelId` 而不是回读 `entry.tsClient.getChannelId()`：`clientMoved`
+   * 事件到达时适配器的频道跟踪可能尚未更新，回读会拿到旧频道而漏掉刚进入频道的共享。
+   */
+  private screenStreamsForChannel(targetKey: string, channelId: bigint): ScreenShareStreamDescription[] {
     return [...this.screenStreams.values()]
-      .filter((stream) => stream.targetKey === targetKey && stream.channelId === entry.tsClient.getChannelId())
+      .filter((stream) => stream.targetKey === targetKey && stream.channelId === channelId)
       .map((stream) => this.describeScreenStream(stream));
+  }
+
+  /**
+   * 把指定频道的屏幕共享列表重新推给该频道内的所有客户端。
+   *
+   * 用于共享迁移频道后清理旧频道的"直播中"卡片：客户端收到列表后会剔除不在列表中的流
+   * （`screenShareList` 的调谐语义）。刻意不用 `screenShareStopped`——那条消息会驱动
+   * 发起端自己停止推流。
+   */
+  private refreshScreenShareListForChannel(targetKey: string, channelId: bigint): void {
+    const streams = this.screenStreamsForChannel(targetKey, channelId);
+    for (const candidate of this.entries.values()) {
+      if (candidate.target && teamSpeakTargetKey(candidate.target) !== targetKey) continue;
+      try {
+        if (candidate.tsClient.getChannelId() !== channelId) continue;
+      } catch {
+        continue;
+      }
+      this.sendToEntry(candidate.id, { type: "screenShareList", streams });
+    }
   }
 
   /**
@@ -1927,9 +1978,15 @@ export class VoiceBridge {
       if (stream.sfuVideoProducerId !== producerId) return;
       stream.sfuVideoProducerId = undefined;
       for (const piped of stream.pipedByViewerEntryId.values()) piped.videoProducerId = undefined;
-      for (const viewerEntryId of [...stream.viewerEntryIds]) {
-        this.sendToEntry(viewerEntryId, { type: "screenShareVideoClosed", streamId: stream.streamId });
-      }
+      // 源视频 Producer 关闭即整条共享彻底失效（mediasoup 不转码，没有可降级的备选源）。
+      // 这里必须结束整条共享并广播 `screenShareStopped`，让**发起端自己也收到**：
+      // 否则发起端 `screenShareActive` 仍为 true，界面停留在"直播中"，而全体观众
+      // 的 Consumer 已被级联关闭、新观众也只能停在等待态 —— 典型幽灵态。
+      this.logger.warn(
+        { streamId: stream.streamId, producerId, reason: "source-video-producer-closed" },
+        "屏幕共享源视频 Producer 已关闭，结束整条共享",
+      );
+      this.stopScreenStream(stream, "source-producer-closed");
       return;
     }
     if (stream.sfuAudioProducerId !== producerId) return;
@@ -2105,6 +2162,10 @@ export class VoiceBridge {
       }
     }
     if (!this.screenStreams.delete(screenStreamKey(stream.targetKey, stream.streamId))) return;
+    this.logger.warn(
+      { streamId: stream.streamId, reason, ownerEntryId: stream.ownerEntryId, source: stream.source },
+      "屏幕共享整条流已停止",
+    );
     for (const producer of sourceProducers) {
       try { producer.close(); } catch { /* 幂等 */ }
     }
@@ -2130,6 +2191,11 @@ export class VoiceBridge {
       })).catch(() => undefined);
     }
     this.sendToEntry(entry.id, { type: "screenShareLeft", streamId: stream.streamId });
+    // 观测点：观众离开后的剩余人数（诊断"一个观众退出是否影响其他观众"）。
+    this.logger.info(
+      { streamId: stream.streamId, viewerEntryId: entry.id, remainingViewers: stream.viewerCount },
+      "屏幕共享观众离开",
+    );
     this.broadcastScreenMessage(stream, this.screenShareViewerCountMessage(stream));
   }
 
@@ -2292,11 +2358,30 @@ export class VoiceBridge {
     const targetKey = teamSpeakTargetKey(entry.target);
     for (const stream of [...this.screenStreams.values()]) {
       if (stream.targetKey !== targetKey) continue;
-      // A browser share belongs to the gateway user's current channel. Stop
-      // it when that user moves so existing viewers cannot keep a cross-
-      // channel peer alive.
+      // 浏览器共享绑定在发起者当前频道上：发起者换频道时，若已有观众在消费，必须结束
+      // 整条共享（否则观众会继续挂着一个跨频道的流）。
+      //
+      // 但**没有观众时**不能杀流：典型场景是"刚进频道就点共享"——此时共享以入频前的
+      // 频道建流，紧接着服务端执行初次自动入频，旧逻辑会把这条刚开的共享直接判死
+      // （日志表现为 reason=owner-moved-channel，用户侧就是"刚开播几秒自己停了"）。
+      // 无观众的共享改为跟随发起者迁移频道，并同步新旧频道的卡片可见性。
       if (stream.source === "browser" && stream.ownerEntryId === entry.id && stream.channelId !== targetChannelId) {
-        this.stopScreenStream(stream, "owner-moved-channel");
+        const hasViewers = stream.viewerEntryIds.size > 0 || stream.nativeViewerClids.size > 0;
+        if (hasViewers) {
+          this.stopScreenStream(stream, "owner-moved-channel");
+          continue;
+        }
+        const previousChannelId = stream.channelId;
+        stream.channelId = targetChannelId;
+        // 旧频道可能已渲染"直播中"卡片：用列表刷新清掉。不能发 screenShareStopped，
+        // 那会驱动发起端自己停止推流。
+        this.refreshScreenShareListForChannel(stream.targetKey, previousChannelId);
+        // 新频道广播共享开始，让该频道内已有用户看到卡片（排除发起端自身）。
+        this.broadcastScreenMessage(stream, {
+          type: "screenShareStarted",
+          stream: this.describeScreenStream(stream),
+          owner: false,
+        }, stream.ownerEntryId);
         continue;
       }
       // Native TS6 shares are channel-scoped as well. The notification is

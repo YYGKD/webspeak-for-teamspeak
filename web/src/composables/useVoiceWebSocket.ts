@@ -665,6 +665,13 @@ export function useVoiceWebSocket() {
   const screenShareErrorCode = ref("");
   const screenShareRemoteVolume = ref(1);
   let screenShareLocalStream: MediaStream | null = null;
+  /**
+   * 用户本次选择的帧率上限。决定屏幕共享在带宽受限时的取舍方向：
+   * ≥30fps 视为「要流畅」（放视频/游戏）→ 保帧率；否则视为「要看清」（文档/标签页/代码）
+   * → 保分辨率。实测在低码率下 maintain-framerate 会把 1280×720 压到 320×180（文字全糊），
+   * 而 maintain-resolution 能保持原生分辨率、只牺牲帧率。
+   */
+  let screenShareCaptureFrameRate = 30;
   // S4-01（T8）：发起端屏幕双轨 SFU Producer。复用既有 sendTransport，停止共享时销毁。
   let screenShareVideoProducer: MediaProducer | null = null;
   let screenShareAudioProducer: MediaProducer | null = null;
@@ -2432,8 +2439,7 @@ export function useVoiceWebSocket() {
   }
 
   async function collectScreenShareWebRtcStats(): Promise<void> {
-    const hasSfu = Boolean((screenShareActive.value && screenShareVideoProducer) || (screenShareViewing.value && screenShareVideoConsumer));
-    if (screenShareStatsCollecting || (!screenSharePeers.size && !hasSfu)) return;
+    if (screenShareStatsCollecting || !hasScreenShareStatsSource()) return;
     screenShareStatsCollecting = true;
     try {
       const peerStatsList: (ScreenSharePeerStats | null)[] = [];
@@ -2493,6 +2499,34 @@ export function useVoiceWebSocket() {
     screenShareStatsTimer = setInterval(() => { void collectScreenShareWebRtcStats(); }, 1_000);
   }
 
+  /**
+   * 当前是否存在可采集的屏幕共享数据源。
+   *
+   * SFU 架构下数据源有两类，缺一不可判：
+   *  - 发起端：本端推流中的 `screenShareVideoProducer`；
+   *  - 观众端：本端拉流中的 `screenShareVideoConsumer`。
+   * P2P（原生 TeamSpeak 观众/来源）的链路单独由 `screenSharePeers` 承载。
+   */
+  function hasScreenShareStatsSource(): boolean {
+    return Boolean(
+      (screenShareActive.value && screenShareVideoProducer) ||
+        (screenShareViewing.value && screenShareVideoConsumer) ||
+        screenSharePeers.size > 0,
+    );
+  }
+
+  /**
+   * 仅在**确实没有任何屏幕共享数据源**时才停止性能采集轮询。
+   *
+   * 历史缺陷：各处用「`screenSharePeers` 为空就停」做判据，在 SFU 架构下必然误判 ——
+   * 网页观众不再建立 P2P 连接，所以直播端收到 `screenShareViewerLeft`（有网页观众停止
+   * 观看）时 `screenSharePeers` 本来就是空的，于是把**发起端自己**的性能面板一起清空。
+   */
+  function maybeStopScreenShareStatsPolling(): void {
+    if (hasScreenShareStatsSource()) return;
+    stopScreenShareStatsPolling();
+  }
+
   function stopScreenShareStatsPolling(): void {
     if (screenShareStatsTimer) {
       clearInterval(screenShareStatsTimer);
@@ -2516,7 +2550,7 @@ export function useVoiceWebSocket() {
     screenSharePeerTimers.set(peerId, setTimeout(() => {
       screenSharePeerTimers.delete(peerId);
       if (!screenSharePeers.has(peerId)) return;
-      failScreenSharePeer(peerId, "屏幕共享直连协商超时，请确认双方网络允许浏览器直连");
+      failScreenSharePeer(peerId, "屏幕共享直连协商超时，请确认双方网络允许直连");
     }, SCREEN_SHARE_NEGOTIATION_TIMEOUT_MS));
   }
 
@@ -2529,14 +2563,31 @@ export function useVoiceWebSocket() {
     screenSharePendingIce.delete(peerId);
     screenSharePeerStreams.delete(peerId);
     try { peer?.close(); } catch { /* closing an already closed peer is harmless */ }
-    if (!screenSharePeers.size) stopScreenShareStatsPolling();
+    maybeStopScreenShareStatsPolling();
   }
 
   function closeAllScreenSharePeers(): void {
     for (const peerId of [...screenSharePeers.keys()]) closeScreenSharePeer(peerId);
   }
 
-  function setScreenShareP2PError(message = "直连 P2P 失败，当前网络无法建立浏览器之间的直接连接") {
+  /**
+   * 屏幕共享在带宽受限时的取舍方向。
+   *
+   * 实测（真实 WebRTC 编码器，同一码率上限 250kbps 对照）：
+   *  - `contentHint="motion"` + `maintain-framerate` → 编码分辨率被压到 **320×180**（1280×720 的 1/4），
+   *    `qualityLimitationReason: "bandwidth"`，文字完全无法辨认；
+   *  - `maintain-resolution` → 保持 **1280×720**，只牺牲帧率。
+   *
+   * 因此：共享**标签页/窗口**（多为文档、代码、网页）或用户只选了低帧率时，分辨率是不可让步的
+   * 底线，一律保分辨率；只有"整屏共享 + 用户明确要高帧率（≥30fps，放视频/游戏）"才保帧率。
+   */
+  function screenShareDegradationPreference(displaySurface: unknown): RTCDegradationPreference {
+    const surface = typeof displaySurface === "string" ? displaySurface : "";
+    const wantsSmoothness = surface === "monitor" && screenShareCaptureFrameRate >= 30;
+    return wantsSmoothness ? "maintain-framerate" : "maintain-resolution";
+  }
+
+  function setScreenShareP2PError(message = "屏幕共享直连失败，当前网络无法建立与原生 TeamSpeak 客户端的直接连接") {
     screenShareErrorCode.value = "";
     screenShareError.value = message;
   }
@@ -2662,9 +2713,7 @@ export function useVoiceWebSocket() {
     screenShareAudioProducer = null;
     try { video?.close(); } catch { /* 幂等 */ }
     try { audio?.close(); } catch { /* 幂等 */ }
-    if (!screenShareViewing.value && !screenSharePeers.size) {
-      stopScreenShareStatsPolling();
-    }
+    maybeStopScreenShareStatsPolling();
   }
 
   /**
@@ -2715,7 +2764,7 @@ export function useVoiceWebSocket() {
         const sender = (videoProducer as unknown as { rtpSender?: RTCRtpSender }).rtpSender;
         if (sender) {
           const params = sender.getParameters();
-          params.degradationPreference = "maintain-framerate";
+          params.degradationPreference = screenShareDegradationPreference(settings.displaySurface);
           await sender.setParameters(params);
         }
       } catch { /* 浏览器不支持 degradationPreference 时忽略 */ }
@@ -2724,6 +2773,15 @@ export function useVoiceWebSocket() {
         return;
       }
       screenShareVideoProducer = videoProducer;
+      // 非预期关闭自愈：发起端的屏幕 Producer 被对端/传输层关闭（DTLS 抖动、ICE 失效等）
+      // 时，服务端会把整条共享判为结束。若本端界面不复位，就会停留在"直播中"幽灵态
+      // （自己以为在直播、观众却看不到）。这里在 Producer 关闭时主动走停止流程。
+      const handleProducerGone = (): void => {
+        if (screenShareVideoProducer !== videoProducer) return; // 本端主动停止时不重复处理
+        stopScreenShare();
+      };
+      videoProducer.on("@close", handleProducerGone);
+      videoProducer.on("transportclose", handleProducerGone);
       const audioTrack = localStream?.getAudioTracks()[0] ?? null;
       if (audioTrack) {
         const audioProducer = await client.produce({
@@ -2788,7 +2846,8 @@ export function useVoiceWebSocket() {
       const height = typeof settings.height === "number" ? settings.height : null;
       const frameRate = typeof settings.frameRate === "number" ? Math.round(settings.frameRate) : null;
       const ceiling = screenShareBitrateCeiling(width, height);
-      parameters.degradationPreference = "maintain-framerate";
+      // 与 SFU 路径同一取舍判据：文档/标签页等场景必须保分辨率。
+      parameters.degradationPreference = screenShareDegradationPreference(settings.displaySurface);
       parameters.encodings = parameters.encodings.map((encoding) => ({
         ...encoding,
         maxBitrate: ceiling,
@@ -2881,9 +2940,7 @@ export function useVoiceWebSocket() {
     screenShareAudioConsumer = null;
     try { video?.close(); } catch { /* 幂等 */ }
     try { audio?.close(); } catch { /* 幂等 */ }
-    if (!screenShareActive.value && !screenSharePeers.size) {
-      stopScreenShareStatsPolling();
-    }
+    maybeStopScreenShareStatsPolling();
   }
 
   /**
@@ -2919,6 +2976,10 @@ export function useVoiceWebSocket() {
         if (screenShareVideoConsumer !== consumer) return;
         if (screenShareViewingStreamId.value !== streamId) return;
         resetScreenShareViewing();
+        // 视频轨非预期终结（源 Producer 关闭 / 级联关闭）：保留流列表条目，给出可重试
+        // 的提示，而不是静默退回空闲态——否则用户会以为"共享被关了"却不知可重新观看。
+        screenShareErrorCode.value = "SCREEN_SHARE_STREAM_ENDED";
+        screenShareError.value = "屏幕共享已中断，可重新点击观看";
         return;
       }
       if (screenShareAudioConsumer !== consumer) return;
@@ -3220,6 +3281,7 @@ export function useVoiceWebSocket() {
       if ("contentHint" in videoTrack) {
         videoTrack.contentHint = (settings?.maxFrameRate ?? 30) >= 30 ? "motion" : "text";
       }
+      screenShareCaptureFrameRate = settings?.maxFrameRate ?? 30;
       screenShareRequestSequence = (screenShareRequestSequence + 1) % 1_000_000;
       screenSharePendingStartId = `screen-start-${screenShareRequestSequence}`;
       for (const track of stream.getTracks()) track.addEventListener("ended", () => { void stopScreenShare(); }, { once: true });
@@ -3518,8 +3580,14 @@ export function useVoiceWebSocket() {
       case "screenShareLeft":
         if (screenShareViewingStreamId.value === String(msg.streamId || "")) leaveScreenShare();
         break;
-      case "screenShareError":
-        screenShareErrorCode.value = typeof msg.code === "string" ? msg.code : "";
+      case "screenShareError": {
+        const code = typeof msg.code === "string" ? msg.code : "";
+        // 收敛竞态：源 Producer 非预期关闭时，本端可能先发 screenShareStop、服务端随后
+        // 才处理，回执 SCREEN_SHARE_NOT_FOUND。此时本端已退出共享/观看，属正常收敛而非
+        // 需要提示用户的失败——静默忽略，避免弹出误导性的错误横幅。
+        const alreadyConverged = !screenShareActive.value && !screenShareStarting.value && !screenShareViewing.value;
+        if (alreadyConverged && (code === "SCREEN_SHARE_NOT_FOUND" || code === "SCREEN_SHARE_NOT_OWNER")) break;
+        screenShareErrorCode.value = code;
         screenShareError.value = String(msg.message || "屏幕共享操作失败");
         if (screenShareStarting.value) {
           releaseScreenShareProducers();
@@ -3541,6 +3609,7 @@ export function useVoiceWebSocket() {
           screenShareRemoteStream.value = null;
         }
         break;
+      }
       case "memberEnter":
         if (!members.some((member) => member.id === msg.id)) {
           members.push({ id: msg.id, nickname: msg.nickname, uid: typeof msg.uid === "string" ? msg.uid : undefined, avatar: typeof msg.avatar === "string" ? msg.avatar : undefined, isSelf: Boolean(msg.isSelf) });

@@ -110,7 +110,7 @@
                   <div v-if="screenShareWebRtcStats.capture" class="webrtc-stats-capture"><span>{{ t('screenShareCapture') }}</span><strong>{{ screenShareWebRtcStats.capture.width ?? '—' }} × {{ screenShareWebRtcStats.capture.height ?? '—' }}</strong><small>{{ screenShareWebRtcStats.capture.frameRate == null ? '—' : `${screenShareWebRtcStats.capture.frameRate.toFixed(1)} FPS` }}</small></div>
                   <div v-for="peer in screenShareWebRtcStats.peers" :key="peer.peerId" class="webrtc-stats-peer">
                     <div class="webrtc-stats-peer-heading"><strong>{{ peer.direction === 'outbound' ? t('screenShareSending') : t('screenShareReceiving') }}</strong><small>{{ peer.connectionState }} · {{ peer.candidateType ?? '—' }}</small></div>
-                    <div class="webrtc-stats-values"><span>{{ peer.frameRate == null ? '—' : `${peer.frameRate.toFixed(1)} FPS` }}</span><span>{{ peer.bitrateKbps == null ? '—' : `${Math.round(peer.bitrateKbps)} kbps` }}</span><span>{{ peer.lossPercent == null ? '—' : `${peer.lossPercent.toFixed(2)}%` }} {{ t('packetLoss') }}</span><span>{{ peer.framesDropped == null ? '—' : peer.framesDropped }} {{ t('screenShareDroppedFrames') }}</span><span>{{ peer.jitterMs == null ? '—' : `${Math.round(peer.jitterMs)} ms` }} {{ t('screenShareJitter') }}</span><span>{{ peer.roundTripTimeMs == null ? '—' : `${Math.round(peer.roundTripTimeMs)} ms` }} {{ t('screenShareRtt') }}</span></div>
+                    <div class="webrtc-stats-values"><span>{{ peer.width ?? '—' }} × {{ peer.height ?? '—' }}</span><span>{{ peer.frameRate == null ? '—' : `${peer.frameRate.toFixed(1)} FPS` }}</span><span>{{ peer.bitrateKbps == null ? '—' : `${Math.round(peer.bitrateKbps)} kbps` }}</span><span>{{ peer.lossPercent == null ? '—' : `${peer.lossPercent.toFixed(2)}%` }} {{ t('packetLoss') }}</span><span>{{ peer.framesDropped == null ? '—' : peer.framesDropped }} {{ t('screenShareDroppedFrames') }}</span><span>{{ peer.jitterMs == null ? '—' : `${Math.round(peer.jitterMs)} ms` }} {{ t('screenShareJitter') }}</span><span>{{ peer.roundTripTimeMs == null ? '—' : `${Math.round(peer.roundTripTimeMs)} ms` }} {{ t('screenShareRtt') }}</span></div>
                     <small v-if="peer.codec || peer.qualityLimitationReason" class="webrtc-stats-detail">{{ peer.codec ?? '—' }}<template v-if="peer.qualityLimitationReason"> · {{ peer.qualityLimitationReason }}</template></small>
                   </div>
                 </section>
@@ -155,8 +155,8 @@
               <div v-if="screenShareError" class="screen-share-inline-error" role="status"><Icon name="info" :size="15" /> <span>{{ screenShareErrorText }}</span></div>
               <section v-if="screenShareViewing" ref="screenSharePlayerEl" class="screen-share-player" role="region" :aria-label="t('screenShare')">
                 <div class="screen-share-player-stage">
-                  <video v-if="screenShareRemoteStream" :ref="setScreenVideoElement" class="screen-share-player-video" autoplay playsinline :muted="screenShareRemoteVolume === 0"></video>
-                  <div v-else class="screen-share-player-placeholder"><span class="screen-share-player-placeholder-icon"><Icon name="monitor" :size="28" /></span><strong>{{ t('screenShareConnecting') }}</strong><span>{{ screenShareError ? screenShareErrorText : t('directP2POnly') }}</span></div>
+                  <video :ref="setScreenVideoElement" :class="['screen-share-player-video', { 'is-idle': !screenShareRemoteStream }]" autoplay playsinline :muted="screenShareRemoteVolume === 0"></video>
+                  <div v-if="!screenShareRemoteStream" class="screen-share-player-placeholder"><span class="screen-share-player-placeholder-icon"><Icon name="monitor" :size="28" /></span><strong>{{ t('screenShareConnecting') }}</strong><span>{{ screenShareError ? screenShareErrorText : t('screenShareSfuRelay') }}</span></div>
                   <button type="button" class="screen-share-player-exit" :aria-label="t('screenShareExit')" :title="t('screenShareExit')" @click="leaveScreenShare"><Icon name="close" :size="22" /></button>
                   <div class="screen-share-player-viewers" :aria-label="t('screenShareViewers')">
                     <span class="screen-share-player-viewer-label"><Icon name="users" :size="14" /> {{ screenSharePlayerViewerCount }}</span>
@@ -691,7 +691,7 @@ const translations: Record<string, Record<string, string>> = {
     teamSpeakSource: "TeamSpeak 客户端来源",
     sharedAudio: "含共享音频",
     noScreenShares: "当前没有正在进行的屏幕共享",
-    directP2POnly: "直连 P2P · STUN 仅用于发现公网地址",
+    screenShareSfuRelay: "画面经服务器中转（SFU）· 无需点对点直连",
     screenShareNativeUnavailable: "原生 TeamSpeak 屏幕共享暂不支持网页观看",
     screenShareExit: "退出观看",
     screenShareConnecting: "正在连接屏幕共享",
@@ -1032,7 +1032,7 @@ const translations: Record<string, Record<string, string>> = {
     teamSpeakSource: "TeamSpeak client source",
     sharedAudio: "with shared audio",
     noScreenShares: "No active screen shares",
-    directP2POnly: "Direct P2P · STUN for public candidate discovery",
+    screenShareSfuRelay: "Relayed via server (SFU) · no peer-to-peer connection needed",
     screenShareNativeUnavailable: "Native TeamSpeak screen sharing is not available to web viewers yet",
     screenShareExit: "Exit viewer",
     screenShareConnecting: "Connecting to screen share",
@@ -1372,6 +1372,7 @@ translations.de = {
   screenShareNativeUnavailable: "Native TeamSpeak-Bildschirmfreigabe ist für Web-Zuschauer noch nicht verfügbar",
   screenShareExit: "Ansicht verlassen",
   screenShareConnecting: "Bildschirmfreigabe wird verbunden",
+  screenShareSfuRelay: "Über Server vermittelt (SFU) · keine Peer-to-Peer-Verbindung nötig",
   screenShareViewers: "Aktuelle Zuschauer",
   screenShareFullscreen: "Vollbild",
   screenShareExitFullscreen: "Vollbild verlassen",
@@ -1649,6 +1650,7 @@ translations.ru = {
   screenShareNativeUnavailable: "Демонстрация экрана TeamSpeak пока недоступна для веб-просмотра",
   screenShareExit: "Выйти из просмотра",
   screenShareConnecting: "Подключение к трансляции экрана",
+  screenShareSfuRelay: "Через сервер (SFU) · прямое P2P-соединение не требуется",
   screenShareViewers: "Текущие зрители",
   screenShareFullscreen: "На весь экран",
   screenShareExitFullscreen: "Выйти из полноэкранного режима",
@@ -1773,6 +1775,7 @@ translations.ja = {
   screenShareNativeUnavailable: "TeamSpeak のネイティブ画面共有は現在ウェブで視聴できません",
   screenShareExit: "視聴を終了",
   screenShareConnecting: "画面共有に接続中",
+  screenShareSfuRelay: "サーバー経由（SFU）・P2P 直結は不要",
   screenShareViewers: "現在の視聴者",
   screenShareFullscreen: "全画面",
   screenShareExitFullscreen: "全画面を終了",
@@ -3361,7 +3364,18 @@ function onScreenShareVolume(event: Event): void {
 }
 
 function syncScreenShareFullscreen(): void {
-  screenShareFullscreen.value = document.fullscreenElement === screenSharePlayerEl.value;
+  const element = document.fullscreenElement;
+  const player = screenSharePlayerEl.value;
+  screenShareFullscreen.value = Boolean(player) && element === player;
+  // 进入/退出全屏会让部分浏览器重建视频渲染表面，出现一帧黑屏或卡在暂停态。
+  // 切换后重新断言 srcObject 与播放，保证画面连续。
+  void nextTick(() => {
+    const video = screenVideoEl.value;
+    const stream = screenShareRemoteStream.value;
+    if (!video || !stream) return;
+    if (video.srcObject !== stream) video.srcObject = stream;
+    if (video.paused) void video.play().catch(() => undefined);
+  });
 }
 
 async function toggleScreenShareFullscreen(): Promise<void> {
@@ -4511,7 +4525,9 @@ function stopWhisperTalk(): void {
 .screen-share-settings-start { min-height: 35px; padding: 0 12px; font-size: 10px; }
 .screen-share-player { position: relative; margin-top: 17px; overflow: hidden; border: 1px solid #263b37; border-radius: 18px; background: #070d0d; box-shadow: 0 12px 30px color-mix(in srgb, var(--text-primary) 18%, transparent); }
 .screen-share-player-stage { position: relative; display: grid; width: 100%; min-height: 245px; aspect-ratio: 16 / 9; place-items: center; overflow: hidden; background: radial-gradient(circle at 50% 40%, #1d3934, #091010 68%); }
-.screen-share-player-video { display: block; width: 100%; height: 100%; object-fit: contain; background: #030606; }
+.screen-share-player-video { position: absolute; inset: 0; display: block; width: 100%; height: 100%; object-fit: contain; background: #030606; }
+/* 视频元素必须常驻：任何 v-if 卸载/重建都会让浏览器重建视频渲染表面，全屏时表现为黑屏闪屏。 */
+.screen-share-player-video.is-idle { visibility: hidden; }
 .screen-share-player-placeholder { display: flex; align-items: center; flex-direction: column; gap: 10px; max-width: 360px; padding: 30px; color: #b1c2bd; text-align: center; }
 .screen-share-player-placeholder-icon { display: grid; place-items: center; width: 58px; height: 58px; color: #69d2c7; border: 1px solid rgba(105,210,199,.36); border-radius: 18px; background: rgba(105,210,199,.12); }
 .screen-share-player-placeholder strong { color: #f0f8f5; font-size: 15px; }
@@ -4529,8 +4545,18 @@ function stopWhisperTalk(): void {
 .screen-share-player-controls { position: absolute; right: 15px; bottom: 15px; z-index: 3; display: flex; align-items: center; gap: 9px; }
 .screen-share-player-controls label { display: inline-flex; align-items: center; gap: 8px; min-height: 38px; padding: 0 11px; color: #edf7f4; border: 1px solid rgba(255,255,255,.14); border-radius: 999px; background: rgba(8,14,14,.7); box-shadow: 0 5px 16px rgba(0,0,0,.22); backdrop-filter: blur(8px); }
 .screen-share-player-controls input { width: 102px; height: 4px; accent-color: #69d2c7; cursor: pointer; }
-.screen-share-player:fullscreen { width: 100vw; height: 100vh; border: 0; border-radius: 0; background: #030606; }
+/* 全屏尺寸交给 UA 的 `:fullscreen { position: fixed; inset: 0 }`：刻意不写 100vw/100vh。
+   实测在缩放/多屏环境下 vw/vh 会与该全屏视口不一致（同一时刻 100vw 读到的宽度大于
+   window.innerWidth），使整屏画面在切换瞬间按错误尺寸合成 —— 表现为画面缩到一角或反复闪动。
+   容器尺寸只由 inset 决定，舞台与视频仍是 100% 填充，几何公式在窗口态与全屏态完全一致。 */
+.screen-share-player:fullscreen { width: auto; height: auto; margin: 0; border: 0; border-radius: 0; box-shadow: none; background: #030606; }
 .screen-share-player:fullscreen .screen-share-player-stage { height: 100%; max-height: none; aspect-ratio: auto; }
+/* 全屏下取消叠加层的 backdrop-filter：在整屏视频之上每帧重算背景模糊会显著加重合成开销，
+   是 Chromium 上全屏播放闪烁/掉帧的常见诱因；改用不透明底色保持可读性。 */
+.screen-share-player:fullscreen .screen-share-player-exit,
+.screen-share-player:fullscreen .screen-share-player-controls button,
+.screen-share-player:fullscreen .screen-share-player-controls label,
+.screen-share-player:fullscreen .screen-share-player-viewers { backdrop-filter: none; background: rgba(8,14,14,.85); }
 .screen-share-player::backdrop { background: #030606; }
 @keyframes screen-share-wave { 0% { transform: scaleY(.45); opacity: .5; } 100% { transform: scaleY(1); opacity: 1; } }
 @keyframes screen-share-live-dot { 0%, 100% { opacity: .55; transform: scale(.86); } 50% { opacity: 1; transform: scale(1); } }

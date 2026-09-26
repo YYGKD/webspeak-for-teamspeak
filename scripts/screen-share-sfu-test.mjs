@@ -443,6 +443,9 @@ try {
       viewerIds: ["viewer-h4"],
       videoProducerId: sourceVideo.id,
     });
+    // 生产停止路径会从 screenStreams 摘除记录：测试必须先把记录注册进去，
+    // 否则 stopScreenStream 会因 delete 未命中而提前返回（早期版本断言因此为空）。
+    bridge.screenStreams.set(`${stream.targetKey}\u0000${stream.streamId}`, stream);
 
     const piped = await bridge.ensureScreenSharePipe(stream, "viewer-h4");
     check(
@@ -465,14 +468,19 @@ try {
       consumerProducerClose = true;
     });
 
-    // 生产清理逻辑：源 Producer 关闭 → 状态复位 + 定向 screenShareVideoClosed。
+    // 生产清理逻辑（修正后语义）：源视频 Producer 关闭 = 整条共享失效，结束整条流并
+    // **广播** screenShareStopped（含发起端自己），避免"发起端仍显示直播中、观众看不到"。
     bridge.handleScreenShareSourceProducerClosed(stream, sourceVideo.id, true);
+    const stoppedForOwner = sent.some((s) => s.message?.type === "screenShareStopped");
+    const stoppedMessage = sent.find((s) => s.message?.type === "screenShareStopped")?.message;
     check(
-      "H4: 源关闭事件复位 stream 状态并定向通知观众 screenShareVideoClosed",
+      "H4: 源视频 Producer 关闭 → 整条共享停止并广播 screenShareStopped（含发起端）",
       stream.sfuVideoProducerId === undefined &&
-        stream.pipedByViewerEntryId.get("viewer-h4")?.videoProducerId === undefined &&
-        sent.some((s) => s.entryId === "viewer-h4" && s.message?.type === "screenShareVideoClosed"),
-      `sent=${sent.map((s) => s.message?.type).join(",")}`,
+        bridge.screenStreams.size === 0 &&
+        stream.viewerEntryIds.size === 0 &&
+        stoppedForOwner &&
+        stoppedMessage?.reason === "source-producer-closed",
+      `sent=${sent.map((s) => s.message?.type).join(",")} reason=${stoppedMessage?.reason}`,
     );
 
     // 真实级联：关闭源 Producer → PipeProducer 与 Consumer 一并关闭。
@@ -483,6 +491,182 @@ try {
       cascaded && pipeClosed && consumer.closed && consumerProducerClose,
       `pipe.closed=${pipeProducer.closed}, consumer.closed=${consumer.closed}, producerclose=${consumerProducerClose}`,
     );
+  }
+
+  // ═════════════════════ H5：观众离开的隔离性（一个观众退出不得影响其他观众） ═════════════════════
+  console.log("\n=== H5: 观众离开的隔离性 ===");
+  {
+    const target = { host: "127.0.0.1", port: 9987 };
+    const targetKey = teamSpeakTargetKey(target);
+    const ownerRouter = await newRouter();
+    const viewerRouterB = await newRouter();
+    const viewerRouterC = await newRouter();
+    const sourceTransport = await newDirectTransport(ownerRouter, "h5-src");
+    const sourceVideo = await sourceTransport.produce({
+      kind: "video",
+      rtpParameters: vp8Params(0x5001),
+      appData: { mediaType: "screen-video" },
+    });
+
+    const { bridge, sent } = makeBridge();
+    const mkEntry = (id, router, clientId) => ({
+      id,
+      screenPeerId: `peer-${id}`,
+      nickname: id,
+      target,
+      media: { router },
+      ws: { readyState: 1 },
+      members: new Map(),
+      tsClient: { getChannelId: () => 0n, getClientId: () => clientId, isConnected: () => true },
+    });
+    bridge.entries.set("owner-h5", mkEntry("owner-h5", ownerRouter, 1));
+    bridge.entries.set("viewer-h5-b", mkEntry("viewer-h5-b", viewerRouterB, 2));
+    bridge.entries.set("viewer-h5-c", mkEntry("viewer-h5-c", viewerRouterC, 3));
+
+    const stream = screenStream({
+      streamId: "stream-h5",
+      ownerEntryId: "owner-h5",
+      viewerIds: ["viewer-h5-b", "viewer-h5-c"],
+      videoProducerId: sourceVideo.id,
+      targetKey,
+    });
+    bridge.screenStreams.set(`${stream.targetKey}\u0000${stream.streamId}`, stream);
+
+    const pipedB = await bridge.ensureScreenSharePipe(stream, "viewer-h5-b");
+    const pipedC = await bridge.ensureScreenSharePipe(stream, "viewer-h5-c");
+    const transportB = await newDirectTransport(viewerRouterB, "h5-b");
+    const transportC = await newDirectTransport(viewerRouterC, "h5-c");
+    const consumerB = await transportB.consume({ producerId: pipedB.videoProducerId, rtpCapabilities: viewerRouterB.rtpCapabilities });
+    const consumerC = await transportC.consume({ producerId: pipedC.videoProducerId, rtpCapabilities: viewerRouterC.rtpCapabilities });
+    let consumerCProducerClose = false;
+    consumerC.on("producerclose", () => {
+      consumerCProducerClose = true;
+    });
+
+    // 观众 B 退出观看：先关自己的 Consumer，再走服务端 leave 路径。
+    consumerB.close();
+    sent.length = 0;
+    bridge.leaveScreenStream(bridge.entries.get("viewer-h5-b"), stream);
+
+    const sentToC = sent.filter((s) => s.entryId === "viewer-h5-c");
+    const sentTypesToC = sentToC.map((s) => s.message?.type);
+    check(
+      "H5: 观众 B 退出后，观众 C 的 Consumer 与源 PipeProducer 保持存活（视频不中断）",
+      !consumerC.closed && !consumerCProducerClose,
+      `consumerC.closed=${consumerC.closed} producerclose=${consumerCProducerClose}`,
+    );
+    check(
+      "H5: 观众 B 退出不改变源 Producer 与整条流的存活状态",
+      stream.sfuVideoProducerId === sourceVideo.id &&
+        bridge.screenStreams.size === 1 &&
+        stream.viewerEntryIds.size === 1 &&
+        stream.viewerEntryIds.has("viewer-h5-c"),
+      `sfuVideo=${stream.sfuVideoProducerId?.slice(0, 8)}… streams=${bridge.screenStreams.size} viewers=${[...stream.viewerEntryIds].join(",")}`,
+    );
+    check(
+      "H5: 观众 C 只收到观众数更新，绝未收到任何停止/关闭类信令",
+      sentTypesToC.length > 0 &&
+        sentTypesToC.every((type) => type === "screenShareViewerCount") &&
+        !sent.some((s) => s.message?.type === "screenShareStopped" || s.message?.type === "screenShareVideoClosed"),
+      `toC=${sentTypesToC.join(",")}`,
+    );
+    check(
+      "H5: 观众 B 退出仅通知发起端 viewerLeft 并单独回执 B，管道缓存按观众隔离清理",
+      sent.some((s) => s.entryId === "owner-h5" && s.message?.type === "screenShareViewerLeft") &&
+        sent.some((s) => s.entryId === "viewer-h5-b" && s.message?.type === "screenShareLeft") &&
+        !stream.pipedByViewerEntryId.has("viewer-h5-b") &&
+        Boolean(stream.pipedByViewerEntryId.get("viewer-h5-c")?.videoProducerId),
+      `pipedKeys=${[...stream.pipedByViewerEntryId.keys()].join(",")}`,
+    );
+
+    // 观众 B 重新观看：必须能重新拿到可用的管道 Producer（复用既有 PipeTransport 对）。
+    const rejoined = await bridge.ensureScreenSharePipe(stream, "viewer-h5-b");
+    const consumerB2 = await transportB.consume({ producerId: rejoined.videoProducerId, rtpCapabilities: viewerRouterB.rtpCapabilities });
+    check(
+      "H5: 观众 B 重新观看可再次建立管道并成功消费（退出后可恢复）",
+      Boolean(rejoined?.videoProducerId) && !consumerB2.closed && !consumerC.closed,
+      `pipe=${rejoined?.videoProducerId?.slice(0, 8)}…`,
+    );
+    consumerB2.close();
+    consumerC.close();
+
+    // 后进频道可见性：频道内共享列表必须按 (targetKey, channelId) 精确过滤，
+    // 且列表为广播态（不携带 producer 字段、不触发 pipe）。
+    const inChannel = bridge.screenStreamsForChannel(targetKey, 0n);
+    const otherChannel = bridge.screenStreamsForChannel(targetKey, 25n);
+    check(
+      "H5: 频道内共享列表按 (targetKey, channelId) 精确命中（后进频道用户可见）",
+      inChannel.length === 1 &&
+        inChannel[0].streamId === "stream-h5" &&
+        otherChannel.length === 0,
+      `inChannel=${inChannel.length} otherChannel=${otherChannel.length}`,
+    );
+    check(
+      "H5: 列表为纯广播态——不携带 producer 字段（producer 只能经 join 定向下发）",
+      inChannel[0].videoProducerId === undefined && inChannel[0].audioProducerId === undefined,
+      `video=${inChannel[0].videoProducerId ?? "none"} audio=${inChannel[0].audioProducerId ?? "none"}`,
+    );
+  }
+
+  // ═════════════════════ H6：发起者换频道时的共享归属（无观众迁移 / 有观众结束） ═════════════════════
+  console.log("\n=== H6: 发起者换频道时的共享归属 ===");
+  {
+    const target = { host: "127.0.0.1", port: 9987 };
+    const targetKey = teamSpeakTargetKey(target);
+    const mkEntry = (id, channelId, clientId) => ({
+      id,
+      screenPeerId: `peer-${id}`,
+      nickname: id,
+      target,
+      ws: { readyState: 1 },
+      members: new Map(),
+      tsClient: { getChannelId: () => channelId, getClientId: () => clientId, isConnected: () => true },
+    });
+
+    // 场景 1：无观众（"刚进频道就开共享"被初次自动入频触发）→ 共享跟随迁移，不杀流
+    {
+      const { bridge, sent } = makeBridge();
+      bridge.entries.set("owner-h6", mkEntry("owner-h6", 0n, 1));
+      bridge.entries.set("other-h6", mkEntry("other-h6", 25n, 3)); // 新频道里已有的旁观用户
+      const stream = screenStream({ streamId: "stream-h6", ownerEntryId: "owner-h6", targetKey });
+      stream.channelId = 0n;
+      bridge.screenStreams.set(`${targetKey}\u0000${stream.streamId}`, stream);
+
+      bridge.reconcileScreenShareAfterClientMove(bridge.entries.get("owner-h6"), 1, 25n);
+
+      check(
+        "H6: 无观众时发起者换频道 → 共享迁移到新频道而不是被结束",
+        stream.channelId === 25n &&
+          bridge.screenStreams.size === 1 &&
+          !sent.some((s) => s.message?.type === "screenShareStopped"),
+        `channelId=${stream.channelId} streams=${bridge.screenStreams.size}`,
+      );
+      check(
+        "H6: 新频道内已有用户收到 screenShareStarted（卡片可见），发起端自身被排除",
+        sent.some((s) => s.entryId === "other-h6" && s.message?.type === "screenShareStarted") &&
+          !sent.some((s) => s.entryId === "owner-h6" && s.message?.type === "screenShareStarted"),
+        `sent=${sent.map((s) => `${s.entryId}:${s.message?.type}`).join(",")}`,
+      );
+    }
+
+    // 场景 2：有观众 → 维持原语义，结束整条共享，避免跨频道流悬挂
+    {
+      const { bridge, sent } = makeBridge();
+      bridge.entries.set("owner-h6b", mkEntry("owner-h6b", 0n, 1));
+      bridge.entries.set("viewer-h6b", mkEntry("viewer-h6b", 0n, 2));
+      const stream = screenStream({ streamId: "stream-h6b", ownerEntryId: "owner-h6b", viewerIds: ["viewer-h6b"], targetKey });
+      stream.channelId = 0n;
+      bridge.screenStreams.set(`${targetKey}\u0000${stream.streamId}`, stream);
+
+      bridge.reconcileScreenShareAfterClientMove(bridge.entries.get("owner-h6b"), 1, 25n);
+
+      check(
+        "H6: 有观众时发起者换频道 → 结束整条共享（reason=owner-moved-channel）",
+        bridge.screenStreams.size === 0 &&
+          sent.some((s) => s.message?.type === "screenShareStopped" && s.message?.reason === "owner-moved-channel"),
+        `streams=${bridge.screenStreams.size} sent=${sent.map((s) => s.message?.type).join(",")}`,
+      );
+    }
   }
 
   // ═════════════════════ 第 8 项：协商顺序断言（排序即协商优先级） ═════════════════════
