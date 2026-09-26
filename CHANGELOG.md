@@ -8,7 +8,8 @@
 - 配置优先级：管理后台列表非空时以其为准；列表为空则回退到原有环境变量（`WEBSPEAK_STUN_URLS` / `WEBSPEAK_TURN_URLS` / `WEBSPEAK_TURN_SECRET` / `WEBSPEAK_TURN_TTL_SECONDS`），因此**升级后既有部署行为完全不变**，无需改动任何服务器配置。语音与屏幕共享共用同一份解析结果，不会出现两条链路配置不一致。
 - 保存时严格校验并**拒绝**而非静默丢弃：地址必须以 `stun:`/`stuns:`/`turn:`/`turns:` 开头、端口 1–65535 且禁用 53（浏览器会屏蔽）、`turns:` 不允许 `transport=udp`、TURN 条目必须选择凭据方式、展开后下发到浏览器的最多 8 条（与屏幕共享侧既有上限一致）。
 - 数据库 schema 升级到 v8（新增 `ice_servers` 表），迁移前自动生成 `.schema-7.bak` 快照。
-- 新增 `scripts/ice-config-test.mjs`（36 项断言）：静态与临时凭据派生、环境变量回退、加密存储与视图脱敏、全部校验拒绝路径、v7→v8 迁移；`npm test` 现为 9 个套件。
+- 修复管理后台「三态凭据」（服务器密码 / 中继令牌 / 中继节点令牌 / ICE 凭据）的默认值缺陷：接口在调用方未提供操作类型时会自行填入 `keep`，导致**只提交凭据、不提交操作类型**的请求被静默忽略并报「凭据缺失」。现在判定统一收归服务端——显式操作优先，否则「提供了非空凭据」即视为替换，「未提供或空串」一律保留；清空只能用显式 `remove`（空串不再被当作清空，避免表单占位值误删已保存的凭据）。同时修复 `/api/admin/server/test` 在只提交新密码时会拿旧密码去测试的问题。`scripts/ice-config-test.mjs` 扩到 46 项断言。
+- 新增 `scripts/ice-config-test.mjs`（46 项断言）：静态与临时凭据派生、环境变量回退、加密存储与视图脱敏、全部校验拒绝路径、凭据三态契约、v7→v8 迁移；`npm test` 现为 9 个套件。
 
 ### English
 
@@ -16,7 +17,8 @@
 - Precedence: a non-empty console list wins; an empty list falls back to the existing environment variables (`WEBSPEAK_STUN_URLS` / `WEBSPEAK_TURN_URLS` / `WEBSPEAK_TURN_SECRET` / `WEBSPEAK_TURN_TTL_SECONDS`), so **an upgrade changes nothing for an existing deployment** and no server configuration has to be edited. Voice and screen sharing resolve to the same list, so the two paths cannot disagree.
 - Saving validates strictly and **rejects** instead of silently dropping: addresses must start with `stun:`/`stuns:`/`turn:`/`turns:`, use port 1–65535 and not port 53 (browsers block it), `turns:` must not request `transport=udp`, a TURN entry must choose a credential scheme, and at most 8 entries may reach a browser (the ceiling the screen-share path already enforced).
 - Database schema moves to v8 (new `ice_servers` table); a `.schema-7.bak` snapshot is written before the migration.
-- Added `scripts/ice-config-test.mjs` (36 assertions): static vs. ephemeral credential derivation, the environment fallback, encrypted storage and redacted views, every rejection path and the v7→v8 migration. `npm test` now runs 9 suites.
+- Fixed the default-value defect in the admin console's three-state credentials (server password / relay token / relay-node token / ICE credential): the API filled in `keep` whenever the caller omitted the action, so a request that **supplied a credential but no action** was silently ignored and then rejected as “missing”. The decision now lives on the server alone — an explicit action wins, otherwise a non-empty credential means replace and an absent or empty value always means keep; clearing requires an explicit `remove` (an empty string is no longer read as “clear”, so a form placeholder cannot delete a stored credential). Also fixed `/api/admin/server/test` probing the stored password when a new one had been submitted. `scripts/ice-config-test.mjs` grows to 46 assertions.
+- Added `scripts/ice-config-test.mjs` (46 assertions): static vs. ephemeral credential derivation, the environment fallback, encrypted storage and redacted views, every rejection path, the three-state credential contract and the v7→v8 migration. `npm test` now runs 9 suites.
 
 ### Deutsch
 
@@ -24,7 +26,8 @@
 - Vorrang: Eine nicht leere Liste in der Konsole gewinnt; eine leere Liste fällt auf die bestehenden Umgebungsvariablen zurück (`WEBSPEAK_STUN_URLS` / `WEBSPEAK_TURN_URLS` / `WEBSPEAK_TURN_SECRET` / `WEBSPEAK_TURN_TTL_SECONDS`) – **ein Upgrade ändert für ein bestehendes Deployment nichts**, es muss keine Serverkonfiguration angepasst werden. Sprache und Bildschirmfreigabe nutzen dieselbe Liste, ein Auseinanderlaufen ist ausgeschlossen.
 - Beim Speichern wird streng geprüft und **abgelehnt** statt still verworfen: Adressen müssen mit `stun:`/`stuns:`/`turn:`/`turns:` beginnen, Port 1–65535 nutzen und nicht Port 53 (von Browsern blockiert), `turns:` darf kein `transport=udp` anfordern, ein TURN-Eintrag muss ein Anmeldeverfahren wählen, und höchstens 8 Einträge erreichen einen Browser (dieselbe Obergrenze wie beim Bildschirmfreigabe-Pfad).
 - Das Datenbankschema steigt auf v8 (neue Tabelle `ice_servers`); vor der Migration wird ein `.schema-7.bak`-Schnappschuss geschrieben.
-- `scripts/ice-config-test.mjs` hinzugefügt (36 Assertions): statische vs. kurzlebige Anmeldedaten, der Umgebungs-Fallback, verschlüsselte Speicherung und redigierte Ansichten, alle Ablehnungspfade und die Migration v7→v8. `npm test` führt jetzt 9 Suiten aus.
+- Fehler bei den dreistufigen Zugangsdaten der Admin-Konsole behoben (Serverpasswort / Relay-Token / Relay-Knoten-Token / ICE-Zugangsdatum): Die API trug `keep` ein, sobald der Aufrufer die Aktion wegließ, sodass eine Anfrage, die **ein Zugangsdatum ohne Aktion** übermittelte, stillschweigend verworfen und als „fehlt“ abgelehnt wurde. Die Entscheidung liegt jetzt allein beim Server: Eine ausdrückliche Aktion gewinnt, andernfalls bedeutet ein nicht leeres Zugangsdatum „ersetzen“ und ein fehlender oder leerer Wert immer „behalten“; Löschen erfordert ein ausdrückliches `remove` (ein leerer String gilt nicht mehr als „löschen“, damit ein Formularplatzhalter keine gespeicherten Zugangsdaten entfernt). Ebenfalls behoben: `/api/admin/server/test` prüfte das gespeicherte Passwort, wenn ein neues übermittelt wurde. `scripts/ice-config-test.mjs` wächst auf 46 Assertions.
+- `scripts/ice-config-test.mjs` hinzugefügt (46 Assertions): statische vs. kurzlebige Anmeldedaten, der Umgebungs-Fallback, verschlüsselte Speicherung und redigierte Ansichten, alle Ablehnungspfade, der dreistufige Vertrag und die Migration v7→v8. `npm test` führt jetzt 9 Suiten aus.
 
 ### Русский
 
@@ -32,7 +35,8 @@
 - Приоритет: непустой список в консоли имеет приоритет; пустой список откатывается к существующим переменным окружения (`WEBSPEAK_STUN_URLS` / `WEBSPEAK_TURN_URLS` / `WEBSPEAK_TURN_SECRET` / `WEBSPEAK_TURN_TTL_SECONDS`), поэтому **обновление ничего не меняет для существующего развёртывания** и не требует правки конфигурации сервера. Голос и демонстрация экрана используют один и тот же список — расхождение между ними исключено.
 - При сохранении выполняется строгая проверка и **отказ** вместо тихого отбрасывания: адрес должен начинаться с `stun:`/`stuns:`/`turn:`/`turns:`, использовать порт 1–65535 и не порт 53 (браузеры его блокируют), `turns:` не должен запрашивать `transport=udp`, для записи TURN нужно выбрать схему аутентификации, а до браузера доходит не более 8 записей (тот же предел, что и в пути демонстрации экрана).
 - Схема базы данных обновлена до v8 (новая таблица `ice_servers`); перед миграцией создаётся снимок `.schema-7.bak`.
-- Добавлен `scripts/ice-config-test.mjs` (36 проверок): статические и краткосрочные учётные данные, откат к переменным окружения, шифрованное хранение и обезличенные представления, все пути отказа и миграция v7→v8. `npm test` теперь запускает 9 наборов.
+- Исправлен дефект значений по умолчанию у трёхпозиционных учётных данных админ-консоли (пароль сервера / токен ретранслятора / токен узла ретрансляции / учётные данные ICE): API подставлял `keep`, когда вызывающая сторона не указывала действие, из-за чего запрос, **передавший учётные данные без действия**, молча игнорировался и отклонялся как «отсутствует». Теперь решение принимает только сервер: явное действие имеет приоритет, иначе непустые учётные данные означают замену, а отсутствующее или пустое значение — всегда сохранение; очистка требует явного `remove` (пустая строка больше не считается «очистить», чтобы заполнитель формы не удалил сохранённые данные). Также исправлено: `/api/admin/server/test` проверял сохранённый пароль, когда был передан новый. `scripts/ice-config-test.mjs` вырос до 46 проверок.
+- Добавлен `scripts/ice-config-test.mjs` (46 проверок): статические и краткосрочные учётные данные, откат к переменным окружения, шифрованное хранение и обезличенные представления, все пути отказа, трёхпозиционный контракт учётных данных и миграция v7→v8. `npm test` теперь запускает 9 наборов.
 
 ### 日本語
 
@@ -40,7 +44,8 @@
 - 優先順位：コンソールの一覧が空でなければそれを採用し、空なら既存の環境変数（`WEBSPEAK_STUN_URLS` / `WEBSPEAK_TURN_URLS` / `WEBSPEAK_TURN_SECRET` / `WEBSPEAK_TURN_TTL_SECONDS`）にフォールバックします。したがって**アップグレードしても既存のデプロイの挙動は変わらず**、サーバー設定の変更も不要です。音声と画面共有は同じ解決結果を使うため、両者が食い違うことはありません。
 - 保存時は厳格に検証し、黙って捨てずに**拒否**します：アドレスは `stun:`/`stuns:`/`turn:`/`turns:` で始まり、ポートは 1〜65535（53 はブラウザが遮断するため不可）、`turns:` に `transport=udp` は指定不可、TURN の項目は認証方式の選択が必須、ブラウザに届くのは最大 8 件（画面共有側と同じ上限）。
 - データベーススキーマを v8 に更新（`ice_servers` テーブルを追加）。移行前に `.schema-7.bak` スナップショットを作成します。
-- `scripts/ice-config-test.mjs`（36 件のアサーション）を追加：固定／短命な認証情報の生成、環境変数へのフォールバック、暗号化保存とマスクされた表示、すべての拒否パス、v7→v8 移行をカバー。`npm test` は 9 スイートになりました。
+- 管理コンソールの三状態認証情報（サーバーパスワード / 中継トークン / 中継ノードのトークン / ICE 認証情報）の既定値の不具合を修正：呼び出し側が操作種別を省略すると API が `keep` を補っていたため、**認証情報だけを送ったリクエスト**が黙って無視され「認証情報がありません」と拒否されていました。判定はサーバー側に一元化し、明示的な操作を最優先、次に「空でない認証情報」は置換、「未指定または空文字」は常に保持とし、消去には明示的な `remove` が必要です（空文字は消去とみなさないため、フォームのプレースホルダーが保存済みの認証情報を削除することはありません）。あわせて `/api/admin/server/test` が新しいパスワードを送っても保存済みのパスワードで検査していた問題も修正。`scripts/ice-config-test.mjs` は 46 件に拡張。
+- `scripts/ice-config-test.mjs`（46 件のアサーション）を追加：固定／短命な認証情報の生成、環境変数へのフォールバック、暗号化保存とマスクされた表示、すべての拒否パス、認証情報の三状態契約、v7→v8 移行をカバー。`npm test` は 9 スイートになりました。
 
 ## [0.2.5] — 2026-09-26
 

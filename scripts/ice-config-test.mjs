@@ -18,6 +18,13 @@
  *        secret 过短、TTL 越界、展开后超过 8 条、id 重复。
  *   ⑤ schema v7 → v8 迁移
  *      - 建表且旧数据保留，schemaVersion 为 8。
+ *   ⑥ 凭据三态契约（中继节点令牌 / 服务器密码 / ICE 凭据）
+ *      - 显式 action 优先；否则「给了非空凭据」= replace，「没给或空串」= keep；
+ *        清空只能用显式 remove。空串绝不能被当成清空——客户端展开表单对象时
+ *        空字段会以 "" 出现，误判会静默抹掉已保存的凭据。
+ *      - 这条契约曾经因为 admin-router 无条件填 "keep" 而变成死代码，导致直接
+ *        调接口提交凭据被静默忽略；router 侧的回归由 .local/tools/ice-config-e2e.mjs
+ *        在真实 HTTP 上覆盖（单元测试碰不到那一层）。
  *
  * 用法：npx tsx scripts/ice-config-test.mjs
  */
@@ -367,6 +374,82 @@ expectReject("静态凭据超过 512 字符被拒绝", "INVALID_ICE_CREDENTIAL",
     accepted = false;
   }
   check(`恰好 ${ICE_SERVER_MAX_ENTRIES} 条被接受（上界不误伤）`, accepted && admin.getResolvedIceServers().length === ICE_SERVER_MAX_ENTRIES, `accepted=${accepted}`);
+  submit({ iceServers: [] });
+}
+
+console.log("=== ⑥ 凭据三态契约（中继节点令牌 / 服务器密码 / ICE 凭据）===");
+
+// 契约：显式 action 优先；否则「给了非空凭据」= replace，「没给或空串」= keep。
+// 清空只能用显式 remove。这条契约曾经因为 router 无条件填 "keep" 而变成死代码，
+// 导致直接调接口提交凭据被静默忽略——所以这里逐个凭据锁住行为。
+const RELAY_TOKEN = "relay-token-0123456789";
+const relayNode = (overrides = {}) => ({ id: "relay-1", name: "中继", target: "relay.example.com#39087", enabled: true, token: RELAY_TOKEN, ...overrides });
+const storedRelayToken = () => {
+  const row = database.listRelayNodes().find((node) => node.id === "relay-1");
+  return row?.tokenEncrypted ? decryptSecret(row.tokenEncrypted, masterSecret) : null;
+};
+
+// ---- 中继节点令牌：不带 action 提交 → 必须真的存进去 ----
+{
+  submit({ relayNodes: [relayNode({ tokenAction: undefined })] });
+  check(
+    "中继节点：不带 tokenAction 提交令牌 → 令牌被保存（不再被静默忽略）",
+    storedRelayToken() === RELAY_TOKEN,
+    `解密后=${storedRelayToken()}`,
+  );
+}
+
+// ---- 中继节点令牌：完全不提交 token → 保留 ----
+{
+  submit({ relayNodes: [relayNode({ token: undefined, tokenAction: undefined })] });
+  check("中继节点：完全不提交 token → 保留原有令牌", storedRelayToken() === RELAY_TOKEN, `解密后=${storedRelayToken()}`);
+}
+
+// ---- 中继节点令牌：提交空串（表单占位）→ 保留，绝不清空 ----
+{
+  submit({ relayNodes: [relayNode({ token: "", tokenAction: undefined })] });
+  check(
+    "中继节点：提交空串 token → 保留原有令牌（空串不等于清空）",
+    storedRelayToken() === RELAY_TOKEN,
+    `解密后=${storedRelayToken()}`,
+  );
+}
+
+// ---- 中继节点令牌：显式 remove → 清空 ----
+{
+  submit({ relayNodes: [relayNode({ enabled: false, tokenAction: "remove", token: undefined })] });
+  check("中继节点：显式 tokenAction=remove → 清空令牌", storedRelayToken() === null, `解密后=${storedRelayToken()}`);
+  submit({ relayNodes: [] });
+}
+
+// ---- 服务器密码：不带 action 提交 → 保存 ----
+{
+  submit({ serverPassword: "ts-server-password" });
+  check("服务器密码：不带 passwordAction 提交 → 被保存", Boolean(database.getSettings().tsPasswordEncrypted), "tsPasswordEncrypted 非空");
+  // ---- 空串 → 保留 ----
+  submit({ serverPassword: "" });
+  const preserved = database.getSettings().tsPasswordEncrypted;
+  check(
+    "服务器密码：提交空串 → 保留原有密码（空串不等于清空）",
+    Boolean(preserved) && decryptSecret(preserved, masterSecret) === "ts-server-password",
+    `解密后=${preserved ? decryptSecret(preserved, masterSecret) : "(空)"}`,
+  );
+  // ---- 显式 remove → 清空 ----
+  submit({ passwordAction: "remove" });
+  check("服务器密码：显式 passwordAction=remove → 清空", database.getSettings().tsPasswordEncrypted === null);
+}
+
+// ---- ICE 凭据：空串 → 保留（与上面同一契约） ----
+{
+  submit({ iceServers: [entry({ id: "ice-keep-empty", enabled: true })] });
+  const before = database.listIceServers().find((item) => item.id === "ice-keep-empty").credentialEncrypted;
+  submit({ iceServers: [entry({ id: "ice-keep-empty", enabled: true, credential: "", credentialAction: undefined })] });
+  const after = database.listIceServers().find((item) => item.id === "ice-keep-empty").credentialEncrypted;
+  check(
+    "ICE 凭据：提交空串 → 保留原有凭据（空串不等于清空）",
+    Boolean(after) && after === before && decryptSecret(after, masterSecret) === "pass-1",
+    `解密后=${after ? decryptSecret(after, masterSecret) : "(空)"}`,
+  );
   submit({ iceServers: [] });
 }
 

@@ -1,7 +1,7 @@
 import { Router, type NextFunction, type Request, type Response } from "express";
 import { closeSync, existsSync, fstatSync, openSync, readSync } from "node:fs";
 import type { Logger } from "../logger.js";
-import { AdminInputError, AdminService, type AdminSettingsInput, type IceServerInput, type RelayNodeInput } from "./admin-service.js";
+import { AdminInputError, AdminService, resolveCredentialAction, type AdminSettingsInput, type IceServerInput, type RelayNodeInput } from "./admin-service.js";
 import { AdminSessionStore, isSecureRequest } from "./admin-session.js";
 import { AdminLoginRateLimiter, waitFor } from "./login-rate-limit.js";
 import { TeamSpeakProbeError } from "../server/teamspeak-probe.js";
@@ -264,7 +264,15 @@ export function createAdminRouter(options: AdminRouterOptions): Router {
 
   router.post("/server/test", requireSameOrigin, requireCsrf(options.sessions), async (request, response) => {
     const body = asRecord(request.body);
-    const action = readPasswordAction(body.passwordAction);
+    // Test with the password the caller just typed when they supplied one,
+    // otherwise with the stored one. Defaulting the action to "keep" here made a
+    // posted password invisible to the probe: the test reported the result of the
+    // *stored* credential while the administrator believed it had verified the new
+    // one.
+    const action = resolveCredentialAction(
+      body.passwordAction === undefined ? undefined : readPasswordAction(body.passwordAction),
+      typeof body.serverPassword === "string" ? body.serverPassword : undefined,
+    );
     const password = action === "remove"
       ? ""
       : typeof body.serverPassword === "string"
@@ -355,7 +363,7 @@ function readSettingsInput(body: Record<string, unknown>): AdminSettingsInput {
         target: typeof node.target === "string" ? node.target.slice(0, 300) : "",
         enabled: node.enabled === true,
         token: typeof node.token === "string" ? node.token.slice(0, 512) : undefined,
-        tokenAction: readPasswordAction(node.tokenAction),
+        tokenAction: node.tokenAction === undefined ? undefined : readPasswordAction(node.tokenAction),
       };
     })
     : undefined;
@@ -388,7 +396,11 @@ function readSettingsInput(body: Record<string, unknown>): AdminSettingsInput {
   return {
     target: readString(body, "target", 300),
     serverPassword: typeof body.serverPassword === "string" ? body.serverPassword.slice(0, 512) : undefined,
-    passwordAction: readPasswordAction(body.passwordAction),
+    // Every credential action below is passed through as `undefined` when the key
+    // is absent, so AdminService.resolveCredentialAction decides what an omitted
+    // action means. Pre-filling "keep" here (as this function used to) makes that
+    // decision unreachable and silently discards credentials the caller supplied.
+    passwordAction: body.passwordAction === undefined ? undefined : readPasswordAction(body.passwordAction),
     accessMode: body.accessMode === "open" ? "open" : body.accessMode === "fixed" ? "fixed" : body.accessMode as never,
     siteName: readString(body, "siteName", 80),
     welcomeText: readOptionalString(body, "welcomeText", 500),
@@ -404,7 +416,7 @@ function readSettingsInput(body: Record<string, unknown>): AdminSettingsInput {
     relayName: typeof body.relayName === "string" ? body.relayName.slice(0, 80) : undefined,
     relayTarget: typeof body.relayTarget === "string" ? body.relayTarget.slice(0, 300) : undefined,
     relayToken: typeof body.relayToken === "string" ? body.relayToken.slice(0, 512) : undefined,
-    relayTokenAction: readPasswordAction(body.relayTokenAction),
+    relayTokenAction: body.relayTokenAction === undefined ? undefined : readPasswordAction(body.relayTokenAction),
     relayNodes,
     iceServers,
   };

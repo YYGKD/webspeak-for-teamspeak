@@ -487,7 +487,7 @@ export class AdminService {
     }
 
     let encryptedPassword = current.tsPasswordEncrypted;
-    const action = input.passwordAction ?? (input.serverPassword === undefined ? "keep" : "replace");
+    const action = resolveCredentialAction(input.passwordAction, input.serverPassword);
     if (action === "remove") encryptedPassword = null;
     if (action === "replace") encryptedPassword = input.serverPassword ? encryptSecret(input.serverPassword, this.masterSecret) : null;
 
@@ -524,7 +524,7 @@ export class AdminService {
         relayHost = "";
         relayPort = DEFAULT_ACCELERATION_RELAY_PORT;
       }
-      const relayTokenAction = input.relayTokenAction ?? (input.relayToken === undefined ? "keep" : "replace");
+      const relayTokenAction = resolveCredentialAction(input.relayTokenAction, input.relayToken);
       if (relayTokenAction === "remove") relayTokenEncrypted = null;
       if (relayTokenAction === "replace") relayTokenEncrypted = input.relayToken ? encryptSecret(input.relayToken, this.masterSecret) : null;
       if (relayEnabled && !relayTokenEncrypted) throw new AdminInputError("INVALID_RELAY_TOKEN", "Relay token is required when the relay is enabled");
@@ -581,7 +581,7 @@ export class AdminService {
       if (seen.has(id)) throw new AdminInputError("INVALID_RELAY_ID", "Relay id must be unique");
       seen.add(id);
       const previous = current.get(id);
-      const tokenAction = input.tokenAction ?? (input.token === undefined ? "keep" : "replace");
+      const tokenAction = resolveCredentialAction(input.tokenAction, input.token);
       let tokenEncrypted = previous?.tokenEncrypted ?? null;
       if (tokenAction === "remove") tokenEncrypted = null;
       if (tokenAction === "replace") {
@@ -701,7 +701,7 @@ export class AdminService {
       seen.add(id);
 
       const previous = current.get(id);
-      const credentialAction = input.credentialAction ?? (input.credential === undefined ? "keep" : "replace");
+      const credentialAction = resolveCredentialAction(input.credentialAction, input.credential);
       let credentialEncrypted = previous?.credentialEncrypted ?? null;
       if (credentialAction === "remove") credentialEncrypted = null;
       if (credentialAction === "replace") {
@@ -873,6 +873,33 @@ function hashInviteToken(token: string): string {
 
 function formatRelayTarget(host: string, port: number): string {
   return `${host.includes(":") ? `[${host}]` : host}#${port}`;
+}
+
+/**
+ * Resolve the three-state credential action shared by every secret in the admin
+ * settings: the TeamSpeak server password, the legacy single relay token, a relay
+ * node token, and an ICE credential.
+ *
+ * Two rules, both learned the hard way:
+ *
+ * 1. **The transport layer must not pre-fill this field.** `readSettingsInput`
+ *    used to send `"keep"` whenever the caller omitted the key, which made the
+ *    fallback below unreachable — an API client posting `{username, credential}`
+ *    had its credential silently discarded and then rejected as "missing". If you
+ *    are wiring a new credential through a request parser, pass `undefined`
+ *    through untouched.
+ * 2. **An empty string is not a credential: it means "keep", never "wipe".**
+ *    Clearing a stored secret has its own explicit action, so a client that
+ *    spreads a form object containing an empty field cannot destroy a working
+ *    configuration by accident. That also rules out a whitespace-only value,
+ *    which is never a real secret and would otherwise be encrypted verbatim.
+ */
+export function resolveCredentialAction(
+  action: "keep" | "replace" | "remove" | undefined,
+  value: string | undefined,
+): "keep" | "replace" | "remove" {
+  if (action) return action;
+  return typeof value === "string" && value.trim().length > 0 ? "replace" : "keep";
 }
 
 /**
