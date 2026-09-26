@@ -103,6 +103,12 @@ WebSpeak распространяется по лицензии [GNU Affero Gene
 
 WebSpeak は [GNU Affero General Public License v3.0 only](./LICENSE) の下で公開されています。変更版をネットワーク経由でユーザーに提供する場合は、対応するソースコードを AGPL-3.0 に従ってユーザーに提供する必要があります。
 
+### 来源与衍生说明 · Origin & derivative
+
+本仓库是 [`EchoSixHIYA/WebSpeak-client-for-TeamSpeak`](https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak) 的**衍生版本**，上游基线为 `v0.2.4`（本仓库标签 `upstream-v0.2.4`）。自 `v0.2.5` 起对源码所作的修改及日期，记录在 [`CHANGELOG.md`](./CHANGELOG.md)；完整声明见 [`NOTICE`](./NOTICE)。
+
+This repository is a **derivative** of [`EchoSixHIYA/WebSpeak-client-for-TeamSpeak`](https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak), based on upstream `v0.2.4` (tagged `upstream-v0.2.4` here). Changes made to the source since `v0.2.5`, and their dates, are recorded in [`CHANGELOG.md`](./CHANGELOG.md); see [`NOTICE`](./NOTICE) for the full statement.
+
 ## Star History
 
 <a href="https://star-history.com/#EchoSixHIYA/WebSpeak-client-for-TeamSpeak&Date">

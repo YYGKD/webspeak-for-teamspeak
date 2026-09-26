@@ -11,7 +11,8 @@ permissions:
   packages: write
 
 env:
-  IMAGE_NAME: ghcr.io/echosixhiya/webspeak
+  # 用仓库所有者动态拼接：写死上游命名空间会让衍生仓库的镜像推送因无权限而失败。
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/webspeak
 
 jobs:
   publish:

@@ -4,6 +4,8 @@
 
 WebSpeak 是一个可自行部署的 TeamSpeak 3 / TeamSpeak 6 网页客户端与语音网关。用户无需安装桌面客户端即可从浏览器加入频道，管理员可以在控制台管理目标服务器、访问方式和运行状态。
 
+> **衍生版本**：本仓库基于 [`EchoSixHIYA/WebSpeak-client-for-TeamSpeak`](https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak)（上游基线 `v0.2.4`）。自 `v0.2.5` 起对源码所作的修改及日期见 [CHANGELOG](../CHANGELOG.md)，完整声明见 [NOTICE](../NOTICE)。
+
 ## ✨ 特性
 
 | 能力 | 说明 |

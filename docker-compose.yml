@@ -1,6 +1,10 @@
 services:
   webspeak:
-    image: ${WEBSPEAK_IMAGE:-ghcr.io/echosixhiya/webspeak:latest}
+    # 本仓库是衍生版本：默认用本仓库的 Dockerfile 本地构建，不再默认拉取上游镜像。
+    # 想改用自己发布到 GHCR 的镜像时显式指定，例如：
+    #   WEBSPEAK_IMAGE=ghcr.io/<你的用户名>/webspeak:latest docker compose up -d
+    build: .
+    image: ${WEBSPEAK_IMAGE:-webspeak:local}
     pull_policy: missing
     restart: unless-stopped
     # WebSpeak needs to reach a TeamSpeak server running on the same host.

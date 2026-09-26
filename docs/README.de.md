@@ -4,6 +4,8 @@
 
 WebSpeak ist ein selbst gehosteter Webclient und ein Sprach-Gateway für TeamSpeak 3 und TeamSpeak 6. Nutzer können ohne Desktop-Client im Browser Kanälen beitreten; Administratoren verwalten Zielserver, Zugriff und Laufzeitstatus über die Webkonsole.
 
+> **Abgeleitete Version**: Dieses Repository basiert auf [`EchoSixHIYA/WebSpeak-client-for-TeamSpeak`](https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak) (Upstream-Basis `v0.2.4`). Änderungen am Quellcode seit `v0.2.5` samt Datum stehen im [CHANGELOG](../CHANGELOG.md); die vollständige Erklärung in der [NOTICE](../NOTICE).
+
 ## ✨ Funktionen
 
 | Funktion | Beschreibung |

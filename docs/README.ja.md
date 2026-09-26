@@ -10,6 +10,8 @@
 | **WHY** | デスクトップクライアントをインストールせず、ブラウザからチャンネルに参加できます。運用者はサーバーとデータを管理できます。 |
 | **HOW** | 起動後、管理コンソールで TeamSpeak の接続先とアクセス方針を設定します。ブラウザが画面と音声を担当し、WebSpeak がゲートウェイとして接続します。 |
 
+> **派生バージョン**：本リポジトリは [`EchoSixHIYA/WebSpeak-client-for-TeamSpeak`](https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak)（上流ベース `v0.2.4`）に基づく派生版です。`v0.2.5` 以降のソース変更と日付は [CHANGELOG](../CHANGELOG.md)、全文は [NOTICE](../NOTICE) に記載しています。
+
 ## ✨ 機能
 
 | 機能 | 説明 |

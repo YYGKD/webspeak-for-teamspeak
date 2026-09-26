@@ -1,0 +1,49 @@
+# NOTICE · 声明
+
+## 衍生版本说明
+
+本仓库是 **WebSpeak** 的衍生版本，基于以下上游开源项目：
+
+- 上游项目：`EchoSixHIYA/WebSpeak-client-for-TeamSpeak`
+  <https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak>
+- 上游基线：`v0.2.4`（对应本仓库历史中的 `ca84029`，已打标签 `upstream-v0.2.4`）
+
+**修改声明（AGPL-3.0 §5）**：自上游 `v0.2.4` 起，本仓库对源码作了修改。修改内容与日期记录在
+[`CHANGELOG.md`](./CHANGELOG.md) 的 `0.2.5` 及之后各版本条目中，对应的提交历史见本仓库 Git 日志。
+主要改动方向：WebRTC 媒体引擎迁移至 mediasoup 单引擎、退役 WebSocket 二进制音频通道、屏幕共享改为
+经网关的 SFU 中央转发（含 H.264 硬件编码），以及若干缺陷修复。
+
+## 许可证
+
+本衍生版本与上游一致，按 **GNU Affero General Public License v3.0 only**（AGPL-3.0-only）分发，
+许可证全文见 [`LICENSE`](./LICENSE)。上游作品的版权归其原作者所有。
+
+由于 WebSpeak 是**通过网络向用户提供服务**的软件，按 AGPL-3.0 §13，向使用者提供本服务的实例必须
+同时向他们提供本衍生版本的完整对应源代码——本仓库即为该源码。
+
+---
+
+## Derivative work notice
+
+This repository is a derivative work of **WebSpeak**, based on:
+
+- Upstream: `EchoSixHIYA/WebSpeak-client-for-TeamSpeak`
+  <https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak>
+- Upstream baseline: `v0.2.4` (commit `ca84029` in this history, tagged `upstream-v0.2.4`)
+
+**Statement of changes (AGPL-3.0 §5)**: the source has been modified since upstream `v0.2.4`.
+The changes and their dates are recorded in [`CHANGELOG.md`](./CHANGELOG.md) under version `0.2.5`
+and later, with the corresponding commit history in this repository's Git log. The main areas are the
+migration of the WebRTC media engine to a single mediasoup engine, retirement of the WebSocket binary
+audio channel, screen sharing moved to SFU central forwarding through the gateway (with H.264 hardware
+encoding), and a number of bug fixes.
+
+## License
+
+Like the upstream project, this derivative is distributed under the
+**GNU Affero General Public License v3.0 only** (AGPL-3.0-only); see [`LICENSE`](./LICENSE).
+Copyright of the upstream work remains with its original authors.
+
+Because WebSpeak is software **offered to users over a network**, AGPL-3.0 §13 requires an instance
+serving this derivative to offer those users the complete corresponding source code — this repository
+is that source.
