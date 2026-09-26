@@ -71,6 +71,35 @@ export const MEDIA_CODECS: readonly RouterRtpCodecCapability[] = [
     preferredPayloadType: 111,
     rtcpFeedback: [{ type: "transport-cc" }, { type: "nack", parameter: "" }],
   },
+  {
+    kind: "video",
+    mimeType: "video/H264",
+    clockRate: 90000,
+    parameters: {
+      "packetization-mode": 1,
+      "profile-level-id": "42e01f",
+      "level-asymmetry-allowed": 1,
+    },
+    rtcpFeedback: [
+      { type: "nack" },
+      { type: "nack", parameter: "pli" },
+      { type: "ccm", parameter: "fir" },
+      { type: "goog-remb" },
+      { type: "transport-cc" },
+    ],
+  },
+  {
+    kind: "video",
+    mimeType: "video/VP8",
+    clockRate: 90000,
+    rtcpFeedback: [
+      { type: "nack" },
+      { type: "nack", parameter: "pli" },
+      { type: "ccm", parameter: "fir" },
+      { type: "goog-remb" },
+      { type: "transport-cc" },
+    ],
+  },
 ];
 
 /** Worker 二进制定位/校验失败时抛出，属于不可恢复的启动期错误。 */
@@ -306,6 +335,7 @@ export async function createMediaWebRtcTransport(
     enableUdp: options.enableUdp ?? true,
     enableTcp: options.enableTcp ?? true,
     preferUdp: options.preferUdp ?? true,
+    initialAvailableOutgoingBitrate: 3_500_000,
     ...(options.appData ? { appData: options.appData } : {}),
   };
   return router.createWebRtcTransport(transportOptions);

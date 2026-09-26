@@ -36,6 +36,23 @@
 | **WHY** | 无需安装桌面客户端，用户打开网页即可加入频道；部署者仍然掌控目标服务器、访问策略和数据。 | Users can join a voice channel from a browser without installing a desktop client, while the operator keeps control of servers, access, and data. |
 | **HOW** | 部署后在管理员控制台配置 TeamSpeak 目标和访问方式，浏览器负责交互与音频，WebSpeak 负责网关连接。 | Configure the TeamSpeak target and access policy in the administration console. The browser handles interaction and audio; WebSpeak provides the gateway connection. |
 
+## 架构与语音传输 · Architecture & Voice Transport
+
+```text
+浏览器 Browser ── WebRTC (mediasoup-client, Opus) ──► WebSpeak 网关 Gateway ──► TeamSpeak 3 / 6
+浏览器 Browser ── WebSocket（仅 JSON 业务与媒体控制信令）──► WebSpeak 网关 Gateway
+```
+
+- **WebSocket 仅承担 JSON 业务与媒体控制信令**：频道/成员、聊天、屏幕共享协商与 WebRTC/mediasoup 握手信令；不再承载任何音频，入站二进制帧会收到 `UNSUPPORTED_BINARY_FRAME` 协议错误。
+- **音频传输已全面由 WebRTC（mediasoup 单引擎）承载**：上行浏览器 `Producer` → 服务端 DirectTransport `Consumer` → TS3；下行 TS3 说话人 → DirectTransport `Producer` → 浏览器 `mediasoup-client` `Consumer`。
+- 旧的 WebSocket 二进制音频兼容通道（1920 字节 PCM 帧 + 服务端 Opus 软转码）已**全面退役**，不再有 WS 音频回退路径。
+
+**Architecture & Voice Transport**
+
+- **WebSocket carries JSON business and media-control signaling only**: channels/members, chat, screen-share negotiation, and WebRTC/mediasoup handshake signaling. It no longer transports any audio, and inbound binary frames are answered with the `UNSUPPORTED_BINARY_FRAME` protocol error.
+- **All audio is carried by WebRTC (the single mediasoup engine)**: uplink browser `Producer` → server DirectTransport `Consumer` → TS3; downlink TS3 speaker → DirectTransport `Producer` → browser `mediasoup-client` `Consumer`.
+- The legacy WebSocket binary audio compatibility channel (1920-byte PCM frames + server-side Opus transcoding) is **fully retired**, with no WS audio fallback path.
+
 ## 文档 · Documentation
 
 - [简体中文](./docs/README.zh-CN.md)

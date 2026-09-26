@@ -142,7 +142,10 @@
           <div class="reconnect-copy"><strong>{{ voiceState.reconnectFailed ? t('reconnectFailed') : t('connectionInterrupted') }}</strong><span v-if="voiceState.reconnecting">{{ t('reconnectingAttempt', { attempt: voiceState.reconnectAttempt }) }}</span><span v-else>{{ localizedMessage(voiceState.error) }}</span></div>
           <div class="reconnect-actions"><button v-if="voiceState.reconnectFailed" type="button" class="secondary-button" @click="reconnectNow">{{ t('reconnectNow') }}</button><button type="button" class="text-button" @click="doDisconnect">{{ t('back') }}</button></div>
         </div>
-        <div v-if="voiceState.audioNotice" class="reconnect-banner degraded" role="status"><div class="reconnect-copy"><strong>{{ t('audioStatus') }}</strong><span>{{ localizedAudioNotice(voiceState.audioNoticeCode, voiceState.audioNotice) }}</span></div></div>
+        <div v-if="voiceState.audioNotice" class="reconnect-banner degraded" role="status">
+          <div class="reconnect-copy"><strong>{{ t('audioStatus') }}</strong><span>{{ localizedAudioNotice(voiceState.audioNoticeCode, voiceState.audioNotice) }}</span></div>
+          <div v-if="voiceState.audioNoticeCode === 'WEBRTC_UNAVAILABLE'" class="reconnect-actions"><button type="button" class="secondary-button" @click="retryWebRtc">{{ t('retryRealtimeVoice') }}</button></div>
+        </div>
         <div v-for="poke in visiblePokes" :key="poke.id" class="poke-banner" role="status"><Icon name="bell" :size="17" /><span><strong>{{ poke.invokerName }}</strong> {{ t('pokedYou') }}<small v-if="poke.message">：{{ poke.message }}</small></span><button type="button" @click="dismissPoke(poke.id)"><Icon name="close" :size="15" /></button></div>
 
         <div class="workspace-scroll">
@@ -463,6 +466,7 @@ const {
   measureLatency,
   sampleMediaPath,
   webrtcActive,
+  retryWebRtc,
   readRestorableSession,
   channelInfos,
   requestChannelInfo,
@@ -899,13 +903,14 @@ const translations: Record<string, Record<string, string>> = {
     teamSpeakServer: "TeamSpeak",
     transportPath: "传输：{{transport}}",
     transportWebRtc: "WebRTC",
-    transportCompatible: "兼容传输",
+    transportUnavailable: "未建立",
     viaRelay: "中继：{{name}}",
     mediaPathRtt: "媒体路径 RTT",
     mediaPathLoss: "媒体丢包",
     probeFailure: "探测失败",
     gatewayToTeamSpeak: "WebSpeak → TeamSpeak",
-    mediaPathUnavailable: "当前为兼容传输，没有可测的媒体路径 RTT",
+    mediaPathUnavailable: "实时语音（WebRTC）未建立，没有可测的媒体路径 RTT",
+    retryRealtimeVoice: "重新尝试",
     measuring: "正在测量…",
     measureComplete: "持续监测中（每 3 秒更新）",
     measureNow: "立即测量",
@@ -1239,13 +1244,14 @@ const translations: Record<string, Record<string, string>> = {
     teamSpeakServer: "TeamSpeak",
     transportPath: "Transport: {{transport}}",
     transportWebRtc: "WebRTC",
-    transportCompatible: "Compatible transport",
+    transportUnavailable: "Not established",
     viaRelay: "Relay: {{name}}",
     mediaPathRtt: "Media path RTT",
     mediaPathLoss: "Media loss",
     probeFailure: "Probe failures",
     gatewayToTeamSpeak: "WebSpeak → TeamSpeak",
-    mediaPathUnavailable: "Compatible transport is active, so there is no media-path RTT to measure",
+    mediaPathUnavailable: "WebRTC realtime voice is not established, so there is no media-path RTT to measure",
+    retryRealtimeVoice: "Try again",
     measuring: "Measuring…",
     measureComplete: "Monitoring continuously (updates every 3s)",
     measureNow: "Measure now",
@@ -1573,13 +1579,14 @@ translations.de = {
     teamSpeakServer: "TeamSpeak",
     transportPath: "Transport: {{transport}}",
     transportWebRtc: "WebRTC",
-    transportCompatible: "Kompatibler Transport",
+    transportUnavailable: "Nicht hergestellt",
     viaRelay: "Relay: {{name}}",
     mediaPathRtt: "Medienpfad-RTT",
     mediaPathLoss: "Medienverlust",
     probeFailure: "Fehlgeschlagene Messungen",
     gatewayToTeamSpeak: "WebSpeak → TeamSpeak",
-    mediaPathUnavailable: "Kompatibler Transport aktiv – kein Medienpfad-RTT messbar",
+    mediaPathUnavailable: "Echtzeitstimme über WebRTC ist nicht hergestellt – kein Medienpfad-RTT messbar",
+    retryRealtimeVoice: "Erneut versuchen",
     measuring: "Wird gemessen…",
     measureComplete: "Laufende Messung (alle 3 Sekunden)",
     measureNow: "Jetzt messen",
@@ -1697,12 +1704,13 @@ translations.ru = {
   networkPerformanceHint: "Измерение медиапути от браузера до WebSpeak и участка WebSpeak → TeamSpeak",
   transportPath: "Транспорт: {{transport}}",
   transportWebRtc: "WebRTC",
-  transportCompatible: "Совместимый транспорт",
+  transportUnavailable: "Не установлено",
   viaRelay: "Ретранслятор: {{name}}",
   mediaPathRtt: "RTT медиапути",
   mediaPathLoss: "Потери в медиапотоке",
   probeFailure: "Неудачные измерения",
-  mediaPathUnavailable: "Активен совместимый транспорт — RTT медиапути недоступен",
+  mediaPathUnavailable: "Голосовая связь WebRTC не установлена — RTT медиапути недоступен",
+  retryRealtimeVoice: "Повторить",
   measuring: "Измерение…",
   measureComplete: "Мониторинг продолжается (обновление каждые 3 секунды)",
   measureNow: "Измерить сейчас",
@@ -1820,12 +1828,13 @@ translations.ja = {
   networkPerformanceHint: "ブラウザから WebSpeak までのメディアパスと、WebSpeak から TeamSpeak までの継続測定",
   transportPath: "転送方式：{{transport}}",
   transportWebRtc: "WebRTC",
-  transportCompatible: "互換転送",
+  transportUnavailable: "未確立",
   viaRelay: "中継：{{name}}",
   mediaPathRtt: "メディアパス RTT",
   mediaPathLoss: "メディア損失",
   probeFailure: "測定失敗",
-  mediaPathUnavailable: "互換転送のため、メディアパスの RTT は測定できません",
+  mediaPathUnavailable: "WebRTC のリアルタイム音声が未確立のため、メディアパスの RTT は測定できません",
+  retryRealtimeVoice: "再試行",
   measuring: "測定中…",
   measureComplete: "継続監視中（3秒ごとに更新）",
   measureNow: "今すぐ測定",
@@ -2102,11 +2111,11 @@ function localizedAudioNotice(code: string, message: string) {
   if (language.value === "zh") return message;
   const normalizedCode = visibleErrorCode(code || "AUDIO_NOTICE");
   const messages: Record<string, { en: string; de: string; ru: string; ja: string }> = {
-    WEBRTC_FALLBACK: {
-      en: `WebRTC realtime voice is unavailable (error code: ${normalizedCode}). Compatibility transport is active; latency and audio quality may be lower`,
-      de: `Echtzeitstimme über WebRTC ist nicht verfügbar (Fehlercode: ${normalizedCode}). Der Kompatibilitätstransport ist aktiv; Latenz und Audioqualität können schlechter sein`,
-      ru: `Голосовая связь WebRTC недоступна (код ошибки: ${normalizedCode}). Используется совместимый транспорт; задержка и качество звука могут быть ниже`,
-      ja: `WebRTC のリアルタイム音声は利用できません（エラーコード: ${normalizedCode}）。互換トランスポートを使用するため、遅延や音質が低下する場合があります`,
+    WEBRTC_UNAVAILABLE: {
+      en: `WebRTC realtime voice is unavailable (error code: ${normalizedCode}). Check UDP connectivity on your network or click Try again`,
+      de: `Echtzeitstimme über WebRTC ist nicht verfügbar (Fehlercode: ${normalizedCode}). Prüfe die UDP-Konnektivität deines Netzwerks oder klicke auf „Erneut versuchen“`,
+      ru: `Голосовая связь WebRTC недоступна (код ошибки: ${normalizedCode}). Проверьте UDP-соединение в вашей сети или нажмите «Повторить»`,
+      ja: `WebRTC のリアルタイム音声は利用できません（エラーコード: ${normalizedCode}）。ネットワークの UDP 接続を確認するか、「再試行」をクリックしてください`,
     },
     PLAYBACK_BLOCKED: {
       en: "The browser blocked automatic audio playback. Click the page or allow audio playback for this site",
@@ -2137,12 +2146,6 @@ function localizedAudioNotice(code: string, message: string) {
       de: "Der Audiopfad konnte nicht wiederhergestellt werden und das Mikrofon ist nicht zurückgekehrt. Prüfe Gerät und Browserberechtigungen",
       ru: "Не удалось восстановить аудиотракт, микрофон не вернулся. Проверьте устройство и разрешения браузера",
       ja: "音声経路を再構築できず、マイクが復帰しませんでした。デバイスとブラウザの権限を確認してください",
-    },
-    AUDIO_REALTIME_NOT_RESTORED: {
-      en: "The audio path could not be rebuilt. The compatibility transport is active and realtime voice was not restored; enter the voice space again",
-      de: "Der Audiopfad konnte nicht wiederhergestellt werden. Der Kompatibilitätstransport ist aktiv und Echtzeitstimme wurde nicht wiederhergestellt; tritt dem Sprachraum erneut bei",
-      ru: "Не удалось восстановить аудиотракт. Используется совместимый транспорт, голосовая связь в реальном времени не восстановлена; войдите в голосовое пространство заново",
-      ja: "音声経路を再構築できませんでした。互換トランスポートが有効で、リアルタイム音声は復帰していません。音声スペースに入り直してください",
     },
   };
   const locale = language.value === "de" ? "de" : language.value === "ru" ? "ru" : language.value === "ja" ? "ja" : "en";
@@ -2395,7 +2398,7 @@ const performanceStats = computed(() => {
     ready: attempts > 0,
   };
 });
-const performanceTransportLabel = computed(() => webrtcActive.value ? t("transportWebRtc") : t("transportCompatible"));
+const performanceTransportLabel = computed(() => webrtcActive.value ? t("transportWebRtc") : t("transportUnavailable"));
 const activeRelayName = computed(() => {
   const relayId = accelerationRelayId.value;
   if (!relayId) return "";
@@ -2563,6 +2566,23 @@ watch(() => voiceState.reconnecting, (reconnecting, wasReconnecting) => {
 });
 watch(() => voiceState.reconnectFailed, (failed, wasFailed) => {
   if (failed && !wasFailed) playNotification("reconnectFailed");
+});
+
+// 有人进入「我所在频道」时的提示音（对齐 TS3 桌面端语义：只对自己所在频道发声）。
+// 自己换频道、以及首次加载成员列表时只重置基线，不发声，避免一次响一片。
+const currentChannelMemberIds = computed(() => (currentChannel.value?.members ?? []).map((member) => member.id));
+let notifiedChannelId = "";
+let knownChannelMemberIds = new Set<number>();
+watch([() => currentChannel.value?.id, currentChannelMemberIds], ([channelId, memberIds]) => {
+  if (!channelId || !memberIds) return;
+  if (channelId !== notifiedChannelId) {
+    notifiedChannelId = channelId;
+    knownChannelMemberIds = new Set(memberIds);
+    return;
+  }
+  const joined = memberIds.filter((id) => !knownChannelMemberIds.has(id) && id !== voiceState.tsClientId);
+  knownChannelMemberIds = new Set(memberIds);
+  if (joined.length > 0) playNotification("memberJoined");
 });
 
 let deviceChangeHandler: (() => void) | undefined;

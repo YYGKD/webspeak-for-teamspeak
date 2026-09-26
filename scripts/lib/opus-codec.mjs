@@ -1,3 +1,10 @@
+/**
+ * 纯测试辅助模块：封装 TS3 语音链路用到的 Opus 编解码器。
+ *
+ * 从 `src/server/opus-codec.ts` 迁出——生产源码树已全面改走 WebRTC（mediasoup），
+ * 不再直接依赖 `@discordjs/opus` 原生模块；仅 e2e / 基准脚本需要它，故归入测试侧。
+ * complexity/bitrate 调优逻辑与迁移前保持一致。
+ */
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
@@ -6,18 +13,7 @@ const require = createRequire(import.meta.url);
  * @discordjs/opus 暴露的 OpusEncoder。注意它同时承担编码与解码：
  * 该包没有独立的 OpusDecoder 构造器。
  */
-export interface OpusCodec {
-  encode(data: Buffer): Buffer;
-  decode(data: Buffer): Buffer;
-  applyEncoderCTL(ctl: number, value: number): void;
-  applyDecoderCTL(ctl: number, value: number): void;
-  setBitrate(bitrate: number): void;
-  getBitrate(): number;
-}
-
-const { OpusEncoder } = require("@discordjs/opus") as {
-  OpusEncoder: new (sampleRate: number, channels: number) => OpusCodec;
-};
+const { OpusEncoder } = require("@discordjs/opus");
 
 export const OPUS_SAMPLE_RATE = 48_000;
 export const OPUS_CHANNELS = 1;
@@ -46,7 +42,7 @@ const DEFAULT_BITRATE = 48_000;
  * 当前生效的编码复杂度。可用 WEBSPEAK_OPUS_COMPLEXITY 覆盖（0-10），
  * 便于在不重新构建的前提下对比测量。
  */
-export function getOpusComplexity(): number {
+export function getOpusComplexity() {
   const raw = process.env.WEBSPEAK_OPUS_COMPLEXITY?.trim();
   if (!raw) return DEFAULT_COMPLEXITY;
   const value = Number(raw);
@@ -57,10 +53,10 @@ export function getOpusComplexity(): number {
  * 创建用于语音的 Opus 编码器。
  *
  * 每个 CTL 单独捕获异常：当某个参数不被当前 libopus 构建支持时，
- * 只保留该参数的库默认值。编码器创建失败在调用方是会话级错误
- * （voice-bridge 会直接拆除会话），因此不能因为一个可选参数而失败。
+ * 只保留该参数的库默认值。编码器创建失败是会话级错误，因此不能
+ * 因为一个可选参数而失败。
  */
-export function createOpusEncoder(): OpusCodec {
+export function createOpusEncoder() {
   const encoder = new OpusEncoder(OPUS_SAMPLE_RATE, OPUS_CHANNELS);
   applyEncoderCtl(encoder, OPUS_SET_COMPLEXITY_REQUEST, getOpusComplexity());
   applyEncoderCtl(encoder, OPUS_SET_SIGNAL_REQUEST, OPUS_SIGNAL_VOICE);
@@ -71,11 +67,11 @@ export function createOpusEncoder(): OpusCodec {
 /**
  * 创建 Opus 解码器。解码侧没有需要覆盖的参数，保持库默认值。
  */
-export function createOpusDecoder(): OpusCodec {
+export function createOpusDecoder() {
   return new OpusEncoder(OPUS_SAMPLE_RATE, OPUS_CHANNELS);
 }
 
-function applyEncoderCtl(encoder: OpusCodec, ctl: number, value: number): void {
+function applyEncoderCtl(encoder, ctl, value) {
   try {
     encoder.applyEncoderCTL(ctl, value);
   } catch {

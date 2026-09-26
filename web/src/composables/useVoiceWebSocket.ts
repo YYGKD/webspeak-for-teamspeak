@@ -19,6 +19,10 @@ import type {
 
 const micCaptureWorkletUrl = "/mic-capture-worklet.js";
 const SCREEN_SHARE_NEGOTIATION_TIMEOUT_MS = 15_000;
+/** M2 send 方向就绪守卫的等待上限：屏幕双轨 produce 前等待上行 sendTransport 建链。 */
+const SCREEN_SHARE_SEND_READY_TIMEOUT_MS = 12_000;
+/** M2 recv 方向就绪守卫的等待上限：观众端双轨 consume 前等待下行 recvTransport 建链。 */
+const SCREEN_SHARE_RECV_READY_TIMEOUT_MS = 12_000;
 const DEFAULT_SCREEN_SHARE_ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:turn.teamspeak.com:3478" },
   { urls: "stun:turn2.teamspeak.com:3478" },
@@ -145,6 +149,13 @@ export interface ScreenShareStream {
   createdAt: number;
   viewerCount: number;
   viewers: ScreenShareViewer[];
+  /**
+   * R7：观众专属的 SFU 管道 Producer ID（`pipeToRouter keepId:false` 生成的新 UUID），
+   * 由 `screenShareJoined` / `screenShareProducers` 定向下发，广播态描述（如
+   * `screenShareList`）绝不携带。仅在显式携带时覆盖，避免被列表刷新冲掉。
+   */
+  videoProducerId?: string;
+  audioProducerId?: string;
 }
 
 export interface ScreenShareViewer {
@@ -607,7 +618,6 @@ export function useVoiceWebSocket() {
   /** 诊断用：最近收到的服务端消息类型。 */
   const recentMessageTypes: string[] = [];
   let webrtcNegotiationPromise: Promise<void> | null = null;
-  let webrtcFallbackStarted = false;
   // Bounded ladder backoff for WebRTC negotiation retries. The counter is reset
   // only when a new connection starts (see connect()); stopWebRtcTransport() must
   // never reset it, otherwise every retry would zero the counter and loop forever.
@@ -619,9 +629,8 @@ export function useVoiceWebSocket() {
   const storedVolumesByUid = reactive<Record<string, number>>({});
   let microphoneStartPromise: Promise<void> | null = null;
 
-  // WebRTC carries audio when the gateway advertises it. The bounded PCM
-  // WebSocket path remains the compatibility fallback for older browsers and
-  // for deployments where the gateway's built-in UDP media range is unavailable.
+  // WebRTC（mediasoup）是唯一的音频传输路径：网关宣告可用后由浏览器原生编解码器
+  // 承载上下行，不再有 PCM WebSocket 兼容通道。
   let audioCtx: SinkAudioContext | null = null;
   let micStream: MediaStream | null = null;
   let scriptNode: ScriptProcessorNode | null = null;
@@ -646,10 +655,32 @@ export function useVoiceWebSocket() {
   const screenShareViewing = ref(false);
   const screenShareViewingStreamId = ref("");
   const screenShareRemoteStream = ref<MediaStream | null>(null);
+  /**
+   * S4-02（T9）：观众端拉流状态机。`waiting-producer` 表示已进入观看态但发起端
+   * 尚未推流（`stream.videoProducerId` 缺省），等待 `screenShareProducers` 定向
+   * 通知补齐 producerId 后自动唤醒续拉流。
+   */
+  const screenShareViewerState = ref<"idle" | "connecting" | "waiting-producer" | "playing" | "error">("idle");
   const screenShareError = ref("");
   const screenShareErrorCode = ref("");
   const screenShareRemoteVolume = ref(1);
   let screenShareLocalStream: MediaStream | null = null;
+  // S4-01（T8）：发起端屏幕双轨 SFU Producer。复用既有 sendTransport，停止共享时销毁。
+  let screenShareVideoProducer: MediaProducer | null = null;
+  let screenShareAudioProducer: MediaProducer | null = null;
+  // S4-02（T9）：观众端 SFU 双轨 Consumer 句柄。切换流 / 退出观看时优雅关闭。
+  let screenShareVideoConsumer: MediaConsumer | null = null;
+  let screenShareAudioConsumer: MediaConsumer | null = null;
+  /** `ensureScreenShareRecvReady()` 的 in-flight Promise：并发调用共享，避免重复拉起媒体会话。 */
+  let screenShareRecvReadyPromise: Promise<MediaClient> | null = null;
+  /**
+   * S4-03（T10/H2）：Web 观众间 P2P 直连已彻底下线。以下 P2P 状态
+   * （`screenSharePeers` / `screenSharePeerRoles` / `screenSharePeerStreams` /
+   * `screenSharePendingIce`）**仅**服务于原生 TeamSpeak 观众（peerId 形如
+   * `ts-viewer-<clid>`）与 `source === "teamspeak"` 的原生共享流；Web 观众一律走
+   * SFU 中央分发（`startScreenShareSfuViewer`），不再创建 `RTCPeerConnection`。
+   * 最小改动：只加注释，不重命名。
+   */
   const screenSharePeers = new Map<string, RTCPeerConnection>();
   const screenSharePeerRoles = new Map<string, "owner" | "viewer">();
   const screenShareWebRtcStats = reactive<ScreenShareWebRtcStats>({ updatedAt: null, capture: null, peers: [] });
@@ -700,34 +731,13 @@ export function useVoiceWebSocket() {
   let voxRelease = 0;
   const VOX_HOLD = 15;
   const VOX_ATTACK_FRAMES = 1;
-  let convBuf = new Int16Array(1024);
-  let accumBuf = new Int16Array(2048);
-  let accumLen = 0;
 
-  // Playback is kept per client so frames from multiple speakers cannot
-  // interleave into one decoder or one scheduling queue.
-  const remoteDecoders = new Map<number, AudioDecoder>();
-  const remoteDecoderGenerations = new Map<number, number>();
-  let nextRemoteDecoderGeneration = 0;
-  const remotePlayTimes = new Map<number, number>();
-  const remotePlaybackSources = new Map<number, Set<AudioBufferSourceNode>>();
-  const remoteGains = new Map<number, GainNode>();
-  const remoteDecodeTimestamps = new Map<number, number>();
   const volumes = reactive<Record<number, number>>({});
   const speakingIds = reactive(new Set<number>());
   const whisperTargetIds = reactive(new Set<number>());
   const whisperActive = ref(false);
   const speakingTimers = new Map<number, ReturnType<typeof setTimeout>>();
   const SPEAKING_HOLD_MS = 360;
-  const AUDIO_FRAME_SAMPLES = 960;
-  const AUDIO_FRAME_BYTES = AUDIO_FRAME_SAMPLES * 2;
-  const MAX_AUDIO_BUFFERED_FRAMES = 10;
-  const MAX_AUDIO_BUFFERED_BYTES = AUDIO_FRAME_BYTES * MAX_AUDIO_BUFFERED_FRAMES;
-  // Keep the WebSocket playback buffer below the 100 ms latency target. A
-  // 20 ms frame plus three queued decoder frames leaves only a short cushion
-  // for jitter; stale audio is discarded instead of being played late.
-  const MAX_REMOTE_PLAY_AHEAD_SECONDS = 0.08;
-  const MAX_REMOTE_DECODE_QUEUE_FRAMES = 3;
 
   async function saveAudioPreferences(): Promise<void> {
     await saveLocalPreferences({
@@ -796,8 +806,6 @@ export function useVoiceWebSocket() {
   }
 
   function applyOutputVolume(): void {
-    const level = effectiveOutputVolume();
-    for (const [clientId, gain] of remoteGains) gain.gain.value = (volumes[clientId] ?? DEFAULT_MEMBER_VOLUME) * level;
     applySpeakerVolumes();
   }
 
@@ -877,32 +885,26 @@ export function useVoiceWebSocket() {
     if (ctx.setSinkId) await ctx.setSinkId(deviceId || "default");
   }
 
+  /**
+   * 把输出设备同步到已建立的拉流元素上：Chrome 的远端接收流由静音 <audio> 元素驱动，
+   * 只改 AudioContext 不会让旧节点改道，必须逐个重定向，否则切换扬声器后旧说话人仍从原设备出声。
+   */
+  function applySpeakerSink(deviceId: string): void {
+    const sinkId = deviceId || "default";
+    for (const node of speakerNodes.values()) {
+      const element = node.element as SinkAudioElement;
+      if (typeof element.setSinkId !== "function") continue;
+      void element.setSinkId(sinkId).catch(() => undefined);
+    }
+  }
+
   function checkSupport(): string | null {
     if (typeof window === "undefined") return null;
     if (!window.isSecureContext) return "语音功能需要 HTTPS 安全连接";
     if (!navigator.mediaDevices?.getUserMedia) return "当前浏览器不支持麦克风访问";
     if (typeof AudioContext === "undefined") return "当前浏览器不支持 Web Audio 音频处理";
-    // 这里刻意**不**要求 WebCodecs（AudioDecoder）。
-    // 只有兼容（WS）通道需要它 —— 服务端发来的 Opus 得靠 AudioDecoder 解成 PCM
-    // 才能播；WebRTC 通道下 Opus 由浏览器原生解码器在 NetEq 里解，完全不碰 WebCodecs。
-    // 放在这里当硬门槛，会把缺 WebCodecs 的浏览器（较老的 Safari、部分 Firefox /
-    // WebView）整个挡在门外，哪怕 WebRTC 路径完全可用。
-    // 真正的判定放在"要走兼容通道"的那一刻，见 compatibilityPlaybackUnavailable()。
     return null;
   }
-
-  /**
-   * 兼容（WS）通道能不能出声。
-   *
-   * 它靠 WebCodecs 的 AudioDecoder 把服务端发来的 Opus 解成 PCM。缺这个能力时
-   * 上行仍然可用（麦克风由服务端编码），但用户听不到任何人 —— 必须在降级的那一刻
-   * 明确告知，而不是让他自己猜"是不是没人在说话"。
-   */
-  function compatibilityPlaybackUnavailable(): boolean {
-    return typeof AudioDecoder === "undefined";
-  }
-
-  const COMPATIBILITY_PLAYBACK_NOTICE = "当前浏览器缺少音频解码能力（WebCodecs），兼容传输下你将听不到其他人的声音；请更新浏览器后重试";
 
   function microphoneConstraints(): MediaTrackConstraints {
     const constraints: MediaTrackConstraints = {
@@ -955,7 +957,13 @@ export function useVoiceWebSocket() {
       selectedOutputDeviceId.value = "";
       localStorage.setItem("webspeak:output-device", "");
       void saveAudioPreferences();
-      if (audioCtx && outputDeviceSupported.value) void setAudioSink(audioCtx, "").catch(() => undefined);
+      if (audioCtx && outputDeviceSupported.value) {
+        void setAudioSink(audioCtx, "").catch(() => undefined);
+        // 选中的扬声器已消失：回落默认设备时同样要唤醒上下文并同步拉流元素，避免静音悬挂。
+        if (audioCtx.state === "suspended") void audioCtx.resume().catch(() => undefined);
+        applySpeakerSink("");
+        syncAudioContextNotice();
+      }
     }
   }
 
@@ -1037,49 +1045,13 @@ export function useVoiceWebSocket() {
     const handleCaptureChunk = (input: Float32Array, rms?: number): void => {
       if (!input.length) return;
       micLevel.value = Math.min(1, (rms ?? Math.sqrt(input.reduce((sum, sample) => sum + sample * sample, 0) / input.length)) * 6);
-      const socket = ws.value;
-      const shouldSend = !microphoneMuted.value
-        && !microphoneTestActive.value
-        && !webrtcActive.value
-        && socket?.readyState === WebSocket.OPEN
-        && voxGate(input);
-      if (!shouldSend) {
-        accumLen = 0;
-        if (microphoneMuted.value) {
-          voxAttack = 0;
-          voxRelease = 0;
-        }
+      if (microphoneMuted.value) {
+        voxAttack = 0;
+        voxRelease = 0;
         return;
       }
-      if (!socket) {
-        accumLen = 0;
-        return;
-      }
-      const bufferedBytes = socket.bufferedAmount;
-      if (bufferedBytes > MAX_AUDIO_BUFFERED_BYTES) {
-        accumLen = 0;
-        return;
-      }
-
-      if (convBuf.length < input.length) convBuf = new Int16Array(input.length);
-      for (let i = 0; i < input.length; i++) {
-        const sample = Math.max(-1, Math.min(1, input[i]!));
-        convBuf[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
-      }
-
-      const need = accumLen + input.length;
-      if (accumBuf.length < need) accumBuf = new Int16Array(Math.max(need, accumBuf.length * 2));
-      accumBuf.set(convBuf.subarray(0, input.length), accumLen);
-      accumLen = need;
-
-      let offset = 0;
-      while (offset + AUDIO_FRAME_SAMPLES <= accumLen && socket.readyState === WebSocket.OPEN && socket.bufferedAmount <= MAX_AUDIO_BUFFERED_BYTES) {
-        socket.send(accumBuf.slice(offset, offset + AUDIO_FRAME_SAMPLES).buffer);
-        offset += AUDIO_FRAME_SAMPLES;
-      }
-      if (offset > 0) markSpeaking(state.tsClientId);
-      accumLen -= offset;
-      if (offset > 0) accumBuf.set(accumBuf.subarray(offset, offset + accumLen), 0);
+      if (microphoneTestActive.value || webrtcActive.value) return;
+      if (voxGate(input)) markSpeaking(state.tsClientId);
     };
 
     if (typeof AudioWorkletNode !== "undefined" && ctx.audioWorklet) {
@@ -1308,10 +1280,9 @@ export function useVoiceWebSocket() {
    */
   async function startWebRtcTransport(sequence: number, socket: WebSocket): Promise<void> {
     if (typeof RTCPeerConnection === "undefined") throw new Error("当前浏览器不支持 WebRTC");
-    // 麦克风尽力而为：拿不到也继续建 transport（只听模式）。否则"只想听"的用户
-    // （例如只听音乐机器人）会因为麦克风被拒、没有设备或非安全上下文被迫退回
-    // 兼容传输 —— 那条路径的过期音频丢弃策略对连续音频明显更差，音乐听起来
-    // 就是一断一续。
+    // 麦克风尽力而为：拿不到也继续建 transport（只听模式），这样"只想听"的用户
+    // （例如只听音乐机器人）不会因为麦克风被拒、没有设备或非安全上下文而失去
+    // 下行实时音频。
     try {
       await ensureMicrophone();
     } catch {
@@ -1319,8 +1290,8 @@ export function useVoiceWebSocket() {
       // 这里只降级成"没有上行"，不影响下行实时音频。
     }
     if (sequence !== connectionSequence || socket.readyState !== WebSocket.OPEN) return;
-    // WebRTC 接管上行后不再走 WS 采集图（handleCaptureChunk 也以 webrtcActive 兜底），
-    // 避免同一条麦克风被两条链路同时发送。
+    // WebRTC 接管上行后停掉 WS 采集图（handleCaptureChunk 也以 webrtcActive 兜底），
+    // 麦克风电平改由 WebRTC 采集监视器驱动。
     stopCaptureGraph();
 
     const negotiation = (async () => {
@@ -1329,12 +1300,11 @@ export function useVoiceWebSocket() {
         iceServers: activeIceServers,
         onConnectionStateChange: (connectionState, direction) => {
           if (connectionState === "failed" && mediaClient === client) {
-            void fallbackFromWebRtc(sequence, socket, direction === "send" ? "WEBRTC_UPLINK_FAILED" : "WEBRTC_CONNECTION_FAILED");
+            failWebRtc(sequence, socket, direction === "send" ? "WEBRTC_UPLINK_FAILED" : "WEBRTC_CONNECTION_FAILED");
           }
         },
       });
       mediaClient = client;
-      webrtcFallbackStarted = false;
       await client.loadDevice(await mediaSignaling.requestRtpCapabilities());
       await client.createSendTransport();
       await client.createRecvTransport();
@@ -1364,34 +1334,44 @@ export function useVoiceWebSocket() {
     webrtcNegotiationPromise = negotiation;
     try {
       await negotiation;
-    } catch (error) {
+    } catch {
+      // 阶梯退避（2s/5s）还有预算时交给它重试；耗尽后判定实时语音不可用并给出
+      // 重试指引，不再切入任何兼容通道（见 failWebRtc）。
       if (mediaClient && !scheduleWebRtcRetry(sequence, socket, "WEBRTC_NEGOTIATION_FAILED")) {
-        await fallbackFromWebRtc(sequence, socket, "WEBRTC_NEGOTIATION_FAILED");
-        throw error;
+        failWebRtc(sequence, socket, "WEBRTC_NEGOTIATION_FAILED");
       }
     } finally {
       if (webrtcNegotiationPromise === negotiation) webrtcNegotiationPromise = null;
     }
   }
 
-  async function fallbackFromWebRtc(sequence: number, socket: WebSocket, reasonCode = "WEBRTC_UNAVAILABLE"): Promise<void> {
-    if (sequence !== connectionSequence || webrtcFallbackStarted) return;
-    webrtcFallbackStarted = true;
+  /**
+   * WebRTC 协商或媒体链路彻底失败：通知网关释放对端、拆掉媒体客户端，并给出
+   * 明确的网络诊断与重试指引。纯 WebRTC 架构下没有可降级的兼容通道，因此这里
+   * 只把实时语音置为不可用，等待用户检查网络后调用 retryWebRtc 重试。
+   */
+  function failWebRtc(sequence: number, socket: WebSocket, reasonCode = "WEBRTC_UNAVAILABLE"): void {
+    if (sequence !== connectionSequence) return;
     webrtcActive.value = false;
-    if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "webrtcStop", payload: { reason: reasonCode, retries: webRtcRetryCount } }));
+    if (socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: "webrtcStop", payload: { reason: reasonCode, retries: webRtcRetryCount } }));
+    }
     stopWebRtcTransport();
     if (socket.readyState === WebSocket.OPEN && state.connected) {
-      // Degrading to the compatibility transport must be visible: the user is
-      // still connected, but with different latency and audio quality.
-      if (compatibilityPlaybackUnavailable()) {
-        setAudioNotice("COMPATIBILITY_PLAYBACK_UNSUPPORTED", COMPATIBILITY_PLAYBACK_NOTICE);
-      } else {
-        setAudioNotice("WEBRTC_FALLBACK", `实时语音（WebRTC）不可用（错误代码：${safeClientErrorCode(reasonCode) || "WEBRTC_UNAVAILABLE"}），已切换为兼容传输：延迟与音质可能下降`);
-      }
-      try { await startMicrophone(); } catch (error: unknown) {
-        setMicrophoneError(error);
-      }
+      setAudioNotice("WEBRTC_UNAVAILABLE", `实时语音（WebRTC）不可用（错误代码：${safeClientErrorCode(reasonCode) || "WEBRTC_UNAVAILABLE"}），请检查网络 UDP 连通性或点击重新尝试`);
     }
+  }
+
+  /**
+   * 用户主动重试实时语音：清掉不可用告警、重置退避预算后重新发起 WebRTC 协商。
+   * 仅在会话已连接且信令通道可用时有效。
+   */
+  function retryWebRtc(): void {
+    const socket = ws.value;
+    if (!socket || socket.readyState !== WebSocket.OPEN || !state.connected) return;
+    clearAudioNotice("WEBRTC_UNAVAILABLE");
+    webRtcRetryCount = 0;
+    void startWebRtcTransport(connectionSequence, socket).catch(() => undefined);
   }
 
   function stopWebRtcTransport(): void {
@@ -1416,9 +1396,9 @@ export function useVoiceWebSocket() {
    * Schedule a bounded retry of the WebRTC transport.
    *
    * Returns true when a retry was scheduled, false when the retry budget is
-   * exhausted (or the sequence is stale) and the caller must degrade to the
-   * compatibility transport. Never resets webRtcRetryCount — the counter is only
-   * cleared when a new connection starts.
+   * exhausted (or the sequence is stale) and the caller must declare realtime
+   * voice unavailable (see failWebRtc). Never resets webRtcRetryCount — the
+   * counter is cleared when a new connection starts or when the user retries.
    */
   function scheduleWebRtcRetry(
     sequence: number,
@@ -1598,6 +1578,13 @@ export function useVoiceWebSocket() {
       element.muted = true;
       element.srcObject = stream;
       void element.play().catch(() => undefined);
+      // 新入说话人继承当前选择的输出设备：元素支持 setSinkId 时才重定向，否则保持系统默认。
+      if (selectedOutputDeviceId.value) {
+        const sinkElement = element as SinkAudioElement;
+        if (typeof sinkElement.setSinkId === "function") {
+          void sinkElement.setSinkId(selectedOutputDeviceId.value).catch(() => undefined);
+        }
+      }
       gain.gain.value = speakerGainValue(clientId);
       speakerNodes.set(clientId, {
         consumer,
@@ -1788,7 +1775,6 @@ export function useVoiceWebSocket() {
   }
 
   function stopCaptureGraph(): void {
-    accumLen = 0;
     voxAttack = 0;
     voxRelease = 0;
     micLevel.value = 0;
@@ -1835,65 +1821,26 @@ export function useVoiceWebSocket() {
     else await refreshAudioDevices();
   }
 
-  /**
-   * Rebuild the audio path after an input-device change failed.
-   *
-   * Both callers stop the WebRTC transport *before* touching the microphone, so
-   * a failure left the session in a state that looks connected but carries no
-   * audio at all:
-   *  - the local peer is closed, but the gateway only stops forwarding TeamSpeak
-   *    audio to it when it receives `webrtcStop` (or the socket closes), so the
-   *    downlink stayed pointed at a dead peer and the user heard nobody;
-   *  - the WebRTC uplink path is gone as well.
-   * Restore the microphone with the previous device, tell the gateway to drop the
-   * stale peer, and rebuild realtime audio only if the microphone came back.
-   */
-  async function recoverAudioAfterFailedInputChange(restartWebRtc: boolean): Promise<void> {
-    const socket = ws.value;
-    const canUseSocket = Boolean(socket && socket.readyState === WebSocket.OPEN);
-    if (restartWebRtc && canUseSocket) {
-      try { socket!.send(JSON.stringify({ type: "webrtcStop", payload: { reason: "INPUT_DEVICE_CHANGE_RECOVERY", retries: 0 } })); } catch { /* socket is going away */ }
-    }
-    stopWebRtcTransport();
-    try {
-      await startMicrophone();
-    } catch (error) {
-      // startMicrophone already recorded the readable reason; keep it so the UI
-      // can say why there is no voice instead of pretending everything is fine.
-      setMicrophoneError(error);
-    }
-    if (restartWebRtc && canUseSocket && !state.microphoneError) {
-      try {
-        await startWebRtcTransport(connectionSequence, socket!);
-      } catch {
-        // startWebRtcTransport falls back to the compatibility transport itself.
-      }
-    }
-    if (state.microphoneError) {
-      setAudioNotice("AUDIO_PATH_REBUILD_FAILED", "音频处理重建失败：麦克风未能恢复，请检查设备与浏览器权限");
-    } else if (restartWebRtc && canUseSocket && !webrtcActive.value) {
-      setAudioNotice("AUDIO_REALTIME_NOT_RESTORED", "音频处理重建失败：已退回兼容传输，实时语音未能恢复，请重新进入语音空间");
-    }
-  }
-
   async function setInputDevice(deviceId: string): Promise<void> {
     const previousDeviceId = selectedInputDeviceId.value;
-    const shouldRestartWebRtc = webrtcActive.value && Boolean(ws.value);
     selectedInputDeviceId.value = deviceId;
     localStorage.setItem("webspeak:input-device", deviceId);
     void saveAudioPreferences();
     try {
-      if (shouldRestartWebRtc) stopWebRtcTransport();
+      // 换麦只重建本地采集管线，再用 replaceTrack 原地换轨，传输层与下行
+      // Consumer 全程不断，避免切换输入设备后听不到其他成员。
       if (micStream) await startMicrophone();
-      if (shouldRestartWebRtc && ws.value) {
-        stopWebRtcTransport();
-        await startWebRtcTransport(connectionSequence, ws.value);
-      }
+      if (micProducer && !micProducer.closed) await replaceWebRtcAudioTrack();
       await refreshAudioDevices();
     } catch (error) {
       selectedInputDeviceId.value = previousDeviceId;
       localStorage.setItem("webspeak:input-device", previousDeviceId);
-      await recoverAudioAfterFailedInputChange(shouldRestartWebRtc);
+      try {
+        if (micStream) await startMicrophone();
+        if (micProducer && !micProducer.closed) await replaceWebRtcAudioTrack();
+      } catch (recoveryError) {
+        setMicrophoneError(recoveryError);
+      }
       throw error;
     }
   }
@@ -1944,16 +1891,24 @@ export function useVoiceWebSocket() {
     selectedOutputDeviceId.value = deviceId;
     localStorage.setItem("webspeak:output-device", deviceId);
     try {
-      await setAudioSink(getAudioCtx(), deviceId);
+      const ctx = getAudioCtx();
+      await setAudioSink(ctx, deviceId);
+      // 切换输出设备会让部分浏览器挂起 AudioContext（输出时钟被重置），必须显式唤醒，
+      // 并把已建立的拉流元素一并改道，否则表现就是"设置里切了设备却一点声音都没有"。
+      if (ctx.state === "suspended") await ctx.resume();
+      applySpeakerSink(deviceId);
+      syncAudioContextNotice();
       await saveAudioPreferences();
     } catch (error) {
       selectedOutputDeviceId.value = previousDeviceId;
       localStorage.setItem("webspeak:output-device", previousDeviceId);
+      applySpeakerSink(previousDeviceId);
+      syncAudioContextNotice();
       throw error;
     }
   }
 
-  function playNotification(kind: "connected" | "disconnected" | "poke" | "private" | "reconnectFailed"): void {
+  function playNotification(kind: "connected" | "disconnected" | "poke" | "private" | "reconnectFailed" | "memberJoined"): void {
     if (notificationVolume.value <= 0 || outputMuted.value || effectiveOutputVolume() <= 0 || typeof window === "undefined") return;
     try {
       const ctx = getAudioCtx();
@@ -1964,6 +1919,8 @@ export function useVoiceWebSocket() {
         poke: [740, 980],
         private: [600, 760],
         reconnectFailed: [300, 220],
+        // 有人进入我所在频道：柔和的上行音（B4→E5），与"连接成功"区分开
+        memberJoined: [494, 659],
       };
       const oscillator = ctx.createOscillator();
       const gain = ctx.createGain();
@@ -1980,144 +1937,6 @@ export function useVoiceWebSocket() {
     } catch {
       // Notification sounds are best effort and must never affect the session.
     }
-  }
-
-  /**
-   * 每个说话人最近一帧的时长（秒），由解码结果测得。
-   *
-   * 兼容传输的播放上限 80ms 是按 20ms 帧定的；TeamSpeak 的 Opus Music
-   * （codec 5）用 60ms 帧 —— 一帧就占 60ms、两帧 120ms，固定上限会让每一帧
-   * 都被判成"过期"并重置播放，听感就是一断一续。
-   */
-  const remoteFrameSeconds = new Map<number, number>();
-
-  /** 播放上限：固定 80ms，但至少容纳该说话人的两帧。 */
-  function remotePlayAheadLimit(clientId: number): number {
-    return Math.max(MAX_REMOTE_PLAY_AHEAD_SECONDS, (remoteFrameSeconds.get(clientId) ?? 0) * 2);
-  }
-
-  function playAudioFrame(clientId: number, opusData: Uint8Array): void {
-    if (opusData.length < 3) return;
-    let decoder = remoteDecoders.get(clientId);
-    const ctx = getAudioCtx();
-    const now = ctx.currentTime;
-    const scheduledUntil = remotePlayTimes.get(clientId) ?? now;
-    const decodeQueueSize = decoder?.decodeQueueSize ?? 0;
-    if (
-      decoder &&
-      (scheduledUntil > now + remotePlayAheadLimit(clientId) || decodeQueueSize >= MAX_REMOTE_DECODE_QUEUE_FRAMES)
-    ) {
-      resetRemotePlayback(clientId);
-      decoder = undefined;
-    }
-
-    if (!decoder) {
-      const gainNode = ctx.createGain();
-      gainNode.gain.value = (volumes[clientId] ?? DEFAULT_MEMBER_VOLUME) * effectiveOutputVolume();
-      gainNode.connect(ctx.destination);
-      remoteGains.set(clientId, gainNode);
-      const generation = ++nextRemoteDecoderGeneration;
-      const nextDecoder = new AudioDecoder({
-        output: (chunk: AudioData) => {
-          if (remoteDecoderGenerations.get(clientId) !== generation) {
-            chunk.close();
-            return;
-          }
-          try {
-            const { sampleRate, numberOfChannels, numberOfFrames } = chunk;
-            // 记录真实帧长：Opus Music（60ms）与 Opus Voice（20ms）共用这条路径。
-            remoteFrameSeconds.set(clientId, numberOfFrames / sampleRate);
-            const buffer = ctx.createBuffer(numberOfChannels, numberOfFrames, sampleRate);
-            for (let ch = 0; ch < numberOfChannels; ch++) {
-              const data = new Float32Array(numberOfFrames);
-              chunk.copyTo(data, { planeIndex: ch, format: "f32-planar" });
-              buffer.copyToChannel(data, ch);
-            }
-            const source = ctx.createBufferSource();
-            source.buffer = buffer;
-            source.connect(gainNode);
-            let sources = remotePlaybackSources.get(clientId);
-            if (!sources) {
-              sources = new Set<AudioBufferSourceNode>();
-              remotePlaybackSources.set(clientId, sources);
-            }
-            sources.add(source);
-            source.addEventListener("ended", () => {
-              source.disconnect();
-              sources?.delete(source);
-              if (sources?.size === 0) remotePlaybackSources.delete(clientId);
-            }, { once: true });
-            let playTime = remotePlayTimes.get(clientId) ?? ctx.currentTime;
-            if (playTime < ctx.currentTime) playTime = ctx.currentTime;
-            if (playTime + numberOfFrames / sampleRate > ctx.currentTime + remotePlayAheadLimit(clientId)) {
-              source.disconnect();
-              sources.delete(source);
-              if (sources.size === 0) remotePlaybackSources.delete(clientId);
-              chunk.close();
-              resetRemotePlayback(clientId);
-              return;
-            }
-            source.start(playTime);
-            remotePlayTimes.set(clientId, playTime + numberOfFrames / sampleRate);
-          } catch {
-            // A decoder can finish while the audio context is being torn down.
-          }
-          chunk.close();
-        },
-        error: () => {
-          if (remoteDecoderGenerations.get(clientId) === generation) {
-            remoteDecoderGenerations.delete(clientId);
-            remoteDecoders.delete(clientId);
-          }
-        },
-      });
-      nextDecoder.configure({ codec: "opus", sampleRate: 48000, numberOfChannels: 1 });
-      decoder = nextDecoder;
-      remoteDecoderGenerations.set(clientId, generation);
-      remoteDecoders.set(clientId, decoder);
-    }
-
-    try {
-      const timestamp = remoteDecodeTimestamps.get(clientId) ?? 0;
-      // 解码时间轴也按真实帧长推进（20ms 只是首帧前的默认值）。
-      const frameMicros = Math.round((remoteFrameSeconds.get(clientId) ?? 0.02) * 1_000_000);
-      decoder.decode(new EncodedAudioChunk({ type: "key", timestamp, duration: frameMicros, data: opusData }));
-      remoteDecodeTimestamps.set(clientId, timestamp + frameMicros);
-    } catch {
-      // Ignore malformed frames; the next valid frame can still be decoded.
-    }
-  }
-
-  function clearRemotePlayback(clientId: number): void {
-    const decoder = remoteDecoders.get(clientId);
-    if (decoder) {
-      try { decoder.close(); } catch { /* already closed */ }
-    }
-    remoteDecoders.delete(clientId);
-    remoteDecoderGenerations.delete(clientId);
-    remotePlayTimes.delete(clientId);
-    remoteDecodeTimestamps.delete(clientId);
-    const sources = remotePlaybackSources.get(clientId);
-    if (sources) {
-      for (const source of sources) {
-        try { source.stop(); } catch { /* already ended */ }
-        source.disconnect();
-      }
-      remotePlaybackSources.delete(clientId);
-    }
-    // The per-client GainNode stays wired to ctx.destination until it is
-    // disconnected. Only the full disconnect() used to clean it up, so every
-    // decoder reset (queue overflow) and every memberLeave leaked one orphaned
-    // GainNode per client for the rest of the session.
-    const gain = remoteGains.get(clientId);
-    if (gain) {
-      gain.disconnect();
-      remoteGains.delete(clientId);
-    }
-  }
-
-  function resetRemotePlayback(clientId: number): void {
-    clearRemotePlayback(clientId);
   }
 
   let connectWatchdog: ReturnType<typeof setTimeout> | null = null;
@@ -2290,7 +2109,6 @@ export function useVoiceWebSocket() {
   function openVoiceSocket(sequence: number, ticket: string): void {
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     const socket = new WebSocket(`${proto}//${location.host}/ws/voice?ticket=${encodeURIComponent(ticket)}`);
-    socket.binaryType = "arraybuffer";
     ws.value = socket;
     socket.onopen = () => {
       if (sequence !== connectionSequence) {
@@ -2299,14 +2117,11 @@ export function useVoiceWebSocket() {
       }
     };
     socket.onmessage = (event) => {
-      if (typeof event.data === "string") {
-        try {
-          handleMessage(JSON.parse(event.data));
-        } catch {
-          // Ignore malformed control frames.
-        }
-      } else {
-        handleAudioFrame(new Uint8Array(event.data));
+      if (typeof event.data !== "string") return;
+      try {
+        handleMessage(JSON.parse(event.data));
+      } catch {
+        // Ignore malformed control frames.
       }
     };
     socket.onclose = (event) => {
@@ -2462,12 +2277,6 @@ export function useVoiceWebSocket() {
     members.length = 0;
     channels.length = 0;
     chatMessages.length = 0;
-    for (const clientId of new Set([...remoteDecoders.keys(), ...remotePlaybackSources.keys()])) clearRemotePlayback(clientId);
-    remoteDecoderGenerations.clear();
-    remotePlayTimes.clear();
-    remoteDecodeTimestamps.clear();
-    for (const gain of remoteGains.values()) gain.disconnect();
-    remoteGains.clear();
     clearSpeakingState();
     whisperTargetIds.clear();
     whisperActive.value = false;
@@ -2525,9 +2334,15 @@ export function useVoiceWebSocket() {
     };
   }
 
-  async function collectScreenSharePeerStats(peerId: string, peer: RTCPeerConnection, role: "owner" | "viewer"): Promise<ScreenSharePeerStats | null> {
+  function parseScreenShareStatsReport(
+    statsKey: string,
+    report: RTCStatsReport,
+    role: "owner" | "viewer",
+    connectionState: string,
+    iceConnectionState: string,
+    fallbackCandidateType?: string,
+  ): ScreenSharePeerStats | null {
     try {
-      const report = await peer.getStats();
       const records = new Map<string, ScreenShareStatsRecord>();
       let mediaStats: ScreenShareStatsRecord | undefined;
       let remoteInboundStats: ScreenShareStatsRecord | undefined;
@@ -2557,7 +2372,7 @@ export function useVoiceWebSocket() {
         ?? screenShareStatsNumber(mediaStats, role === "owner" ? "framesSent" : "framesReceived");
       const bytes = screenShareStatsNumber(mediaStats, role === "owner" ? "bytesSent" : "bytesReceived");
       const now = performance.now();
-      const previous = screenShareStatsPrevious.get(peerId);
+      const previous = screenShareStatsPrevious.get(statsKey);
       const elapsedMs = previous ? now - previous.sampledAt : 0;
       const derivedFrameRate = previous && elapsedMs >= 250 && frames !== null && previous.frames !== null
         ? Math.max(0, ((frames - previous.frames) * 1_000) / elapsedMs)
@@ -2565,7 +2380,7 @@ export function useVoiceWebSocket() {
       const derivedBitrateKbps = previous && elapsedMs >= 250 && bytes !== null && previous.bytes !== null
         ? Math.max(0, ((bytes - previous.bytes) * 8) / elapsedMs)
         : null;
-      screenShareStatsPrevious.set(peerId, { sampledAt: now, bytes, frames });
+      screenShareStatsPrevious.set(statsKey, { sampledAt: now, bytes, frames });
 
       const packetsLost = screenShareStatsNumber(remoteStats ?? mediaStats, "packetsLost");
       const packetsTransferred = screenShareStatsNumber(mediaStats, role === "owner" ? "packetsSent" : "packetsReceived");
@@ -2575,14 +2390,18 @@ export function useVoiceWebSocket() {
       const jitter = screenShareStatsNumber(remoteStats ?? mediaStats, "jitter");
       const directFrameRate = screenShareStatsNumber(mediaStats, "framesPerSecond") ?? screenShareStatsNumber(trackStats, "framesPerSecond");
       const directBitrateKbps = screenShareStatsNumber(mediaStats, "bitrate") !== null ? (screenShareStatsNumber(mediaStats, "bitrate") as number) / 1_000 : null;
+      const candidateType = screenShareStatsString(localCandidate, "candidateType")
+        ?? screenShareStatsString(remoteCandidate, "candidateType")
+        ?? fallbackCandidateType
+        ?? null;
       return {
-        peerId,
+        peerId: statsKey,
         role,
         direction: role === "owner" ? "outbound" : "inbound",
-        connectionState: peer.connectionState,
-        iceConnectionState: peer.iceConnectionState,
+        connectionState,
+        iceConnectionState,
         codec: screenShareStatsString(codecStats, "mimeType"),
-        candidateType: screenShareStatsString(localCandidate, "candidateType") ?? screenShareStatsString(remoteCandidate, "candidateType"),
+        candidateType,
         width: screenShareStatsNumber(mediaStats, "frameWidth") ?? screenShareStatsNumber(trackStats, "frameWidth"),
         height: screenShareStatsNumber(mediaStats, "frameHeight") ?? screenShareStatsNumber(trackStats, "frameHeight"),
         frameRate: directFrameRate !== null && directFrameRate > 0 ? directFrameRate : derivedFrameRate,
@@ -2603,16 +2422,65 @@ export function useVoiceWebSocket() {
     }
   }
 
+  async function collectScreenSharePeerStats(peerId: string, peer: RTCPeerConnection, role: "owner" | "viewer"): Promise<ScreenSharePeerStats | null> {
+    try {
+      const report = await peer.getStats();
+      return parseScreenShareStatsReport(peerId, report, role, peer.connectionState, peer.iceConnectionState);
+    } catch {
+      return null;
+    }
+  }
+
   async function collectScreenShareWebRtcStats(): Promise<void> {
-    if (screenShareStatsCollecting || !screenSharePeers.size) return;
+    const hasSfu = Boolean((screenShareActive.value && screenShareVideoProducer) || (screenShareViewing.value && screenShareVideoConsumer));
+    if (screenShareStatsCollecting || (!screenSharePeers.size && !hasSfu)) return;
     screenShareStatsCollecting = true;
     try {
-      const peers = await Promise.all([...screenSharePeers.entries()].map(async ([peerId, peer]) => {
-        const role = screenSharePeerRoles.get(peerId) ?? "viewer";
-        return collectScreenSharePeerStats(peerId, peer, role);
-      }));
+      const peerStatsList: (ScreenSharePeerStats | null)[] = [];
+
+      // 1. mediasoup SFU 发起端（推流）性能统计采集
+      if (screenShareActive.value && screenShareVideoProducer) {
+        try {
+          const report = await screenShareVideoProducer.getStats();
+          const stats = parseScreenShareStatsReport(
+            "sfu-screen-producer",
+            report,
+            "owner",
+            "connected",
+            "connected",
+            "SFU",
+          );
+          if (stats) peerStatsList.push(stats);
+        } catch { /* 忽略关闭过程中的瞬态异常 */ }
+      }
+
+      // 2. mediasoup SFU 观看端（拉流）性能统计采集
+      if (screenShareViewing.value && screenShareVideoConsumer) {
+        try {
+          const report = await screenShareVideoConsumer.getStats();
+          const stats = parseScreenShareStatsReport(
+            "sfu-screen-consumer",
+            report,
+            "viewer",
+            "connected",
+            "connected",
+            "SFU",
+          );
+          if (stats) peerStatsList.push(stats);
+        } catch { /* 忽略关闭过程中的瞬态异常 */ }
+      }
+
+      // 3. 原生 TS6 观众 P2P 链路性能统计采集（保持双轨兼容）
+      if (screenSharePeers.size > 0) {
+        const p2pStats = await Promise.all([...screenSharePeers.entries()].map(async ([peerId, peer]) => {
+          const role = screenSharePeerRoles.get(peerId) ?? "viewer";
+          return collectScreenSharePeerStats(peerId, peer, role);
+        }));
+        peerStatsList.push(...p2pStats);
+      }
+
       screenShareWebRtcStats.capture = screenShareStatsCapture();
-      screenShareWebRtcStats.peers = peers.filter((stats): stats is ScreenSharePeerStats => stats !== null);
+      screenShareWebRtcStats.peers = peerStatsList.filter((stats): stats is ScreenSharePeerStats => stats !== null);
       screenShareWebRtcStats.updatedAt = Date.now();
     } finally {
       screenShareStatsCollecting = false;
@@ -2759,6 +2627,146 @@ export function useVoiceWebSocket() {
   }
 
   /**
+   * M2 send 方向对称就绪守卫（T8）。
+   *
+   * 屏幕双轨 produce 复用发起端既有 `sendTransport`。在收到
+   * `screenShareStarted owner:true` 后必须确保 `mediaClient` 存在且上行
+   * sendTransport 已建立就绪；未就绪时等待既有惰性建连流程
+   * （`webrtcNegotiationPromise`）完成，超过上限才抛错。未就绪绝不触发 `produce`。
+   */
+  async function ensureScreenShareSendReady(timeoutMs = SCREEN_SHARE_SEND_READY_TIMEOUT_MS): Promise<MediaClient> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const client = mediaClient;
+      if (client && client.sendTransportId) return client;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error("上行媒体会话尚未就绪");
+      const negotiation = webrtcNegotiationPromise;
+      if (negotiation) {
+        // 复用既有惰性建连流程：等待正在进行的 WebRTC 协商（有界）。
+        await Promise.race([
+          negotiation.catch(() => undefined),
+          new Promise<void>((resolve) => { setTimeout(resolve, remaining); }),
+        ]);
+      } else {
+        await new Promise<void>((resolve) => { setTimeout(resolve, Math.min(remaining, 100)); });
+      }
+    }
+  }
+
+  /** 关闭并清空发起端屏幕双轨 Producer（T8：停止共享 / 推流失败时调用）。 */
+  function releaseScreenShareProducers(): void {
+    const video = screenShareVideoProducer;
+    const audio = screenShareAudioProducer;
+    screenShareVideoProducer = null;
+    screenShareAudioProducer = null;
+    try { video?.close(); } catch { /* 幂等 */ }
+    try { audio?.close(); } catch { /* 幂等 */ }
+    if (!screenShareViewing.value && !screenSharePeers.size) {
+      stopScreenShareStatsPolling();
+    }
+  }
+
+  /**
+   * S4-01（B2/H5/R7）：发起端屏幕双轨 SFU Produce。
+   *
+   * 收到 `screenShareStarted owner:true` 后调用：先过 M2 send 方向就绪守卫，
+   * 再以统一码率天花板 `screenShareBitrateCeiling()` 经 `encodings.maxBitrate`
+   * 发布屏幕视频轨（`appData.mediaType = "screen-video"`），并把 contentHint
+   * 固定为 `"motion"` 保帧率；系统音轨存在时同步发布 `"screen-audio"`。
+   * 成功后把发起端状态机从 starting 推进到 active。SFU 路径不再对该轨调用
+   * `applyScreenShareSenderParameters`（仅保留给原生 TS 观众 P2P 路径）。
+   */
+  async function startScreenShareProducers(streamId: string): Promise<void> {
+    const generation = screenShareStartGeneration;
+    let client: MediaClient;
+    try {
+      client = await ensureScreenShareSendReady();
+    } catch {
+      if (generation !== screenShareStartGeneration) return;
+      failScreenShareStart(streamId, "SCREEN_SHARE_UPLINK_NOT_READY", "屏幕共享上行媒体会话尚未就绪，请稍后重试");
+      return;
+    }
+    if (generation !== screenShareStartGeneration || client !== mediaClient || screenShareActiveStreamId.value !== streamId) return;
+    const localStream = screenShareLocalStream;
+    const videoTrack = localStream?.getVideoTracks()[0];
+    if (!videoTrack) {
+      failScreenShareStart(streamId, "SCREEN_SHARE_NO_VIDEO_TRACK", "无法获取屏幕视频轨，请重试");
+      return;
+    }
+    // SFU 推流保帧率策略：采集端 contentHint = "motion" 优先保帧率，码率天花板由
+    // encodings.maxBitrate 承载；produce 成功后另经 rtpSender.setParameters 显式下发
+    // degradationPreference = "maintain-framerate"（见下方 try 块）。
+    if ("contentHint" in videoTrack) videoTrack.contentHint = "motion";
+    const settings = videoTrack.getSettings();
+    const width = typeof settings.width === "number" ? settings.width : null;
+    const height = typeof settings.height === "number" ? settings.height : null;
+    const ceiling = screenShareBitrateCeiling(width, height);
+    try {
+      // 推流配置锁定：L1T1（单空间层、单时域层）避免 SFU 层间重编码；maxBitrate 取
+      // 按分辨率计算的天花板。produce 成功后把 degradationPreference 固定为
+      // maintain-framerate，带宽紧张时优先降分辨率而非丢帧。
+      const videoProducer = await client.produce({
+        track: videoTrack,
+        appData: { mediaType: "screen-video", streamId },
+        encodings: [{ maxBitrate: ceiling, scalabilityMode: "L1T1" }],
+      });
+      try {
+        const sender = (videoProducer as unknown as { rtpSender?: RTCRtpSender }).rtpSender;
+        if (sender) {
+          const params = sender.getParameters();
+          params.degradationPreference = "maintain-framerate";
+          await sender.setParameters(params);
+        }
+      } catch { /* 浏览器不支持 degradationPreference 时忽略 */ }
+      if (generation !== screenShareStartGeneration || client !== mediaClient) {
+        try { videoProducer.close(); } catch { /* 幂等 */ }
+        return;
+      }
+      screenShareVideoProducer = videoProducer;
+      const audioTrack = localStream?.getAudioTracks()[0] ?? null;
+      if (audioTrack) {
+        const audioProducer = await client.produce({
+          track: audioTrack,
+          appData: { mediaType: "screen-audio", streamId },
+        });
+        if (generation !== screenShareStartGeneration || client !== mediaClient) {
+          try { audioProducer.close(); } catch { /* 幂等 */ }
+          releaseScreenShareProducers();
+          return;
+        }
+        screenShareAudioProducer = audioProducer;
+      }
+      // 推流成功：发起端状态机 starting → active，并启动网络性能采集轮询。
+      screenShareStarting.value = false;
+      screenShareActive.value = true;
+      screenShareActiveStreamId.value = streamId;
+      startScreenShareStatsPolling();
+    } catch {
+      if (generation !== screenShareStartGeneration) return;
+      releaseScreenShareProducers();
+      failScreenShareStart(streamId, "SCREEN_SHARE_PRODUCE_FAILED", "屏幕共享推流失败，请重试");
+    }
+  }
+
+  /** 推流失败 / 就绪超时的统一收尾：通知服务端停止、停轨并复位发起端状态机。 */
+  function failScreenShareStart(streamId: string, code: string, message: string): void {
+    if (screenShareActiveStreamId.value === streamId) {
+      sendScreenShareMessage({ type: "screenShareStop", streamId });
+    }
+    releaseScreenShareProducers();
+    screenShareLocalStream?.getTracks().forEach((track) => track.stop());
+    screenShareLocalStream = null;
+    screenShareStarting.value = false;
+    screenSharePendingStartId = "";
+    screenShareStartCancelled = false;
+    screenShareActive.value = false;
+    screenShareActiveStreamId.value = "";
+    screenShareErrorCode.value = code;
+    screenShareError.value = message;
+  }
+
+  /**
    * 调屏幕共享发送端的编码参数。必须在 setLocalDescription 之后调用 ——
    * encodings 只有协商出编解码器之后才非空，之前调 setParameters 拿不到可写的数组。
    *
@@ -2811,31 +2819,258 @@ export function useVoiceWebSocket() {
     }
   }
 
+  /**
+   * M2 recv 方向对称就绪守卫（T9）。
+   *
+   * 观众端 SFU 拉流依赖下行 `recvTransport`。`mediaClient` 为 null 或尚未完成
+   * 初始化时，先等待既有惰性建链流程（`webrtcNegotiationPromise`），必要时以
+   * `startWebRtcTransport` 拉起媒体会话；`mediaClient` 存在后调用幂等的
+   * `ensureRecvReady()` 确保 device 与 recvTransport 就绪。超过上限才抛错，
+   * 未就绪绝不触发 `consume`。并发调用共享同一个 in-flight Promise。
+   */
+  function ensureScreenShareRecvReady(timeoutMs = SCREEN_SHARE_RECV_READY_TIMEOUT_MS): Promise<MediaClient> {
+    if (!screenShareRecvReadyPromise) {
+      screenShareRecvReadyPromise = waitForScreenShareRecvReady(timeoutMs).finally(() => {
+        screenShareRecvReadyPromise = null;
+      });
+    }
+    return screenShareRecvReadyPromise;
+  }
+
+  async function waitForScreenShareRecvReady(timeoutMs: number): Promise<MediaClient> {
+    const deadline = Date.now() + timeoutMs;
+    let pullUpRequested = false;
+    for (;;) {
+      const client = mediaClient;
+      if (client) {
+        if (client.loaded && client.recvTransportId) return client;
+        try {
+          await client.ensureRecvReady();
+          if (client === mediaClient) return client;
+        } catch {
+          // 建链失败：落入下方重试预算，超时后由调用方统一报错。
+        }
+      } else if (!pullUpRequested) {
+        // mediaClient 缺失：拉起媒体会话（幂等；并发去重由 startWebRtcTransport 自身承担）。
+        pullUpRequested = true;
+        const socket = ws.value;
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          void startWebRtcTransport(connectionSequence, socket).catch(() => undefined);
+        }
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error("下行媒体会话尚未就绪");
+      const negotiation = webrtcNegotiationPromise;
+      if (negotiation) {
+        // 复用既有惰性建链流程：等待正在进行的 WebRTC 协商（有界）。
+        await Promise.race([
+          negotiation.catch(() => undefined),
+          new Promise<void>((resolve) => { setTimeout(resolve, remaining); }),
+        ]);
+      } else {
+        await new Promise<void>((resolve) => { setTimeout(resolve, Math.min(remaining, 100)); });
+      }
+    }
+  }
+
+  /** 关闭并清空观众端 SFU 双轨 Consumer（T9：切换流 / 退出观看时调用）。 */
+  function releaseScreenShareViewerConsumers(): void {
+    const video = screenShareVideoConsumer;
+    const audio = screenShareAudioConsumer;
+    screenShareVideoConsumer = null;
+    screenShareAudioConsumer = null;
+    try { video?.close(); } catch { /* 幂等 */ }
+    try { audio?.close(); } catch { /* 幂等 */ }
+    if (!screenShareActive.value && !screenSharePeers.size) {
+      stopScreenShareStatsPolling();
+    }
+  }
+
+  /**
+   * R4/S4-03（T10）：观众端观看态的统一本地收尾。释放双轨 Consumer、复位观看状态机并
+   * 清空播放器流，**不**发送 `screenShareLeave` —— 本函数由服务端级联关闭信令
+   * （`screenShareVideoClosed` / `screenShareStopped`）或 Consumer 本地兜底事件驱动，
+   * 服务端已掌握关闭语义，重复上报会与级联关闭形成回环。
+   */
+  function resetScreenShareViewing(): void {
+    releaseScreenShareViewerConsumers();
+    screenShareViewerState.value = "idle";
+    screenShareViewing.value = false;
+    screenShareViewingStreamId.value = "";
+    screenShareRemoteStream.value = null;
+  }
+
+  /**
+   * R4/S4-03（T10）：为观众端 SFU Consumer 注册真实事件驱动的本地兜底清理。
+   *
+   * mediasoup-client 的 Consumer **没有** `producerclose` 事件（那是服务端事件），
+   * 真实可用的是：
+   *  - `trackended`：媒体轨实际结束（对端停轨 / 级联关闭）；
+   *  - `@close`：Consumer 被关闭（含服务端级联关闭 PipeProducer 触发的连锁关闭）。
+   *
+   * 视频轨终结 → 退出观看态并释放播放器；音频轨终结 → 仅从 `MediaStream` 移除该音频轨、
+   * 保留画面。本端主动 `close()`（切换流 / 退出观看）会先把模块级句柄置空，处理器据此
+   * 识别并忽略，避免与服务端信令主驱动（`screenShareVideoClosed`）形成回环。
+   */
+  function watchScreenShareConsumer(consumer: MediaConsumer, kind: "video" | "audio", streamId: string): void {
+    const consumerTrack = consumer.track;
+    const handleTrackGone = (): void => {
+      if (kind === "video") {
+        if (screenShareVideoConsumer !== consumer) return;
+        if (screenShareViewingStreamId.value !== streamId) return;
+        resetScreenShareViewing();
+        return;
+      }
+      if (screenShareAudioConsumer !== consumer) return;
+      screenShareAudioConsumer = null;
+      const media = screenShareRemoteStream.value;
+      if (!media) return;
+      for (const track of media.getTracks()) {
+        if (track.id === consumerTrack.id) {
+          media.removeTrack(track);
+          break;
+        }
+      }
+    };
+    consumer.on("trackended", handleTrackGone);
+    consumer.on("@close", handleTrackGone);
+  }
+
+  /** 观众端 SFU 拉流失败的统一收尾：释放 Consumer、退出观看态并提示用户。 */
+  function failScreenShareViewer(message: string): void {
+    releaseScreenShareViewerConsumers();
+    if (screenShareViewingStreamId.value) sendScreenShareMessage({ type: "screenShareLeave", streamId: screenShareViewingStreamId.value });
+    screenShareViewerState.value = "error";
+    screenShareViewing.value = false;
+    screenShareViewingStreamId.value = "";
+    screenShareRemoteStream.value = null;
+    screenShareErrorCode.value = "";
+    screenShareError.value = message;
+  }
+
+  /**
+   * S4-02（T9）：观众端 SFU 双轨 Consume、显式 Resume 与 `<video>` 播放组装。
+   *
+   * 视频轨为必需项：`stream.videoProducerId` 缺省时置入 `waiting-producer` 等待态
+   * 并提示用户，待 `screenShareProducers` 定向补齐后自动唤醒续拉流。视频就绪后先过
+   * M2 recv 就绪守卫，再调用 `consume` 拉取视频轨并显式 `resumeConsumer` 解锁浏览器
+   * 自动播放；若存在 `stream.audioProducerId` 则同步 consume + resume 音频轨。拉流
+   * 轨道组装成单个 `MediaStream` 赋给 `screenShareRemoteStream`，直接挂到 `<video>`
+   * 元素（音画同元素，由原生音量控件调节屏幕声音）。
+   */
+  async function startScreenShareSfuViewer(stream: ScreenShareStream): Promise<void> {
+    if (!stream.videoProducerId) {
+      screenShareViewerState.value = "waiting-producer";
+      screenShareErrorCode.value = "SCREEN_SHARE_WAITING_PRODUCER";
+      screenShareError.value = "等待发起端推流...";
+      return;
+    }
+    screenShareViewerState.value = "connecting";
+    let client: MediaClient;
+    try {
+      client = await ensureScreenShareRecvReady();
+    } catch {
+      failScreenShareViewer("屏幕共享下行媒体会话尚未就绪，请稍后重试");
+      return;
+    }
+    if (client !== mediaClient || screenShareViewingStreamId.value !== stream.streamId) return;
+    releaseScreenShareViewerConsumers();
+    let videoConsumer: MediaConsumer;
+    try {
+      videoConsumer = await client.consume(stream.videoProducerId);
+    } catch {
+      failScreenShareViewer("屏幕共享拉流失败，请重试");
+      return;
+    }
+    // 竞态：consume 期间可能已切换流或整个媒体会话被替换。
+    if (client !== mediaClient || screenShareViewingStreamId.value !== stream.streamId) {
+      try { videoConsumer.close(); } catch { /* 幂等 */ }
+      return;
+    }
+    const tracks: MediaStreamTrack[] = [videoConsumer.track];
+    let audioConsumer: MediaConsumer | null = null;
+    if (stream.audioProducerId) {
+      try {
+        audioConsumer = await client.consume(stream.audioProducerId);
+      } catch {
+        // 音频轨拉取失败不阻断视频：屏幕画面仍可正常观看。
+        audioConsumer = null;
+      }
+      if (audioConsumer) {
+        if (client !== mediaClient || screenShareViewingStreamId.value !== stream.streamId) {
+          try { audioConsumer.close(); } catch { /* 幂等 */ }
+          try { videoConsumer.close(); } catch { /* 幂等 */ }
+          return;
+        }
+        tracks.push(audioConsumer.track);
+      }
+    }
+    screenShareVideoConsumer = videoConsumer;
+    screenShareAudioConsumer = audioConsumer;
+    // R4：注册真实事件驱动的本地兜底清理（trackended / @close），视频轨终结即退出观看态。
+    watchScreenShareConsumer(videoConsumer, "video", stream.streamId);
+    if (audioConsumer) watchScreenShareConsumer(audioConsumer, "audio", stream.streamId);
+    // 自动播放策略会拦下未经用户手势的媒体：显式 resume 解锁；失败不阻断视频（静音播放仍可用）。
+    try { await client.resumeConsumer(videoConsumer); } catch { /* 自动播放解锁失败不阻断视频 */ }
+    if (audioConsumer) {
+      try { await client.resumeConsumer(audioConsumer); } catch { /* 同上 */ }
+    }
+    screenShareRemoteStream.value = new MediaStream(tracks);
+    screenShareViewerState.value = "playing";
+    screenShareErrorCode.value = "";
+    screenShareError.value = "";
+    startScreenShareStatsPolling();
+  }
+
+  /** `screenShareProducers` 后到音频：视频已在播时补拉音频轨并并入现有 MediaStream。 */
+  async function consumeScreenShareAudioTrack(stream: ScreenShareStream): Promise<void> {
+    const producerId = stream.audioProducerId;
+    if (!producerId || screenShareAudioConsumer) return;
+    const client = mediaClient;
+    if (!client || !client.loaded || !client.recvTransportId) return;
+    let audioConsumer: MediaConsumer;
+    try {
+      audioConsumer = await client.consume(producerId);
+    } catch {
+      return;
+    }
+    if (client !== mediaClient || screenShareViewingStreamId.value !== stream.streamId || screenShareAudioConsumer) {
+      try { audioConsumer.close(); } catch { /* 幂等 */ }
+      return;
+    }
+    screenShareAudioConsumer = audioConsumer;
+    // R4：后到音频轨同样注册本地兜底清理（终结时仅移除音频轨，不影响画面）。
+    watchScreenShareConsumer(audioConsumer, "audio", stream.streamId);
+    try { await client.resumeConsumer(audioConsumer); } catch { /* 自动播放解锁失败不阻断视频 */ }
+    const current = screenShareRemoteStream.value;
+    if (current) current.addTrack(audioConsumer.track);
+    else screenShareRemoteStream.value = new MediaStream([audioConsumer.track]);
+  }
+
+  /**
+   * 进入观众观看态。
+   *
+   * S4-03（T10/H2）：Web 观众间 P2P 直连已彻底下线 —— browser 来源流不再创建
+   * `RTCPeerConnection`，整体走 SFU 中央分发（`startScreenShareSfuViewer`）；仅
+   * `source === "teamspeak"` 的原生共享流保留既有 P2P 直连观看路径。
+   */
   async function startScreenShareViewer(stream: ScreenShareStream): Promise<void> {
     closeAllScreenSharePeers();
+    releaseScreenShareViewerConsumers();
     screenShareRemoteStream.value = null;
     screenShareViewing.value = true;
     screenShareViewingStreamId.value = stream.streamId;
     screenShareErrorCode.value = "";
     screenShareError.value = "";
-    const peer = createScreenSharePeer(stream.streamId, stream.ownerPeerId, "viewer");
     if (stream.source === "teamspeak") {
+      // 原生 TeamSpeak 屏幕共享仍走既有 P2P 直连路径（不变，peerId 为 `ts-viewer-*`）。
+      screenShareViewerState.value = "connecting";
+      createScreenSharePeer(stream.streamId, stream.ownerPeerId, "viewer");
       armScreenSharePeerTimer(stream.ownerPeerId);
       return;
     }
-    try {
-      const offer = await peer.createOffer();
-      await peer.setLocalDescription(offer);
-      armScreenSharePeerTimer(stream.ownerPeerId);
-      sendScreenShareMessage({
-        type: "screenShareSignal",
-        streamId: stream.streamId,
-        targetPeerId: stream.ownerPeerId,
-        signal: { kind: "offer", sdp: peer.localDescription?.sdp ?? offer.sdp ?? "" },
-      });
-    } catch {
-      failScreenSharePeer(stream.ownerPeerId, "无法创建屏幕共享直连请求，请重试");
-    }
+    // 浏览器端屏幕共享走 SFU 中央分发：双轨 consume + 显式 resume（T9）。
+    await startScreenShareSfuViewer(stream);
   }
 
   async function startNativeScreenShareViewer(streamId: string, peerId: string): Promise<void> {
@@ -2887,6 +3122,14 @@ export function useVoiceWebSocket() {
       return;
     }
 
+    // S4-03（T10/H2）：Web 观众间 P2P 直连已下线。browser 来源流的 P2P 信令仅放行原生
+    // TeamSpeak 观众（peerId 形如 `ts-viewer-<clid>`）。对非该前缀的 offer 直接拦截忽略，
+    // 避免 Web 观众误触发发起端 P2P 应答（服务端 `relayScreenShareSignal` 亦返回
+    // `SCREEN_SHARE_SIGNAL_FORBIDDEN` 拒绝该路径，此处为前端侧双保险）。
+    if (stream.source === "browser" && signal.kind === "offer" && !fromPeerId.startsWith("ts-viewer-")) {
+      return;
+    }
+
     if (stream.source === "teamspeak" && screenShareViewingStreamId.value === streamId && fromPeerId === stream.ownerPeerId && signal.kind === "offer") {
       const peer = screenSharePeers.get(fromPeerId) ?? createScreenSharePeer(streamId, fromPeerId, "viewer");
       if (!signal.sdp) return;
@@ -2915,19 +3158,11 @@ export function useVoiceWebSocket() {
       return;
     }
 
-    if (stream.source === "browser" && stream.ownerPeerId === fromPeerId && signal.kind === "answer") {
-      const peer = screenSharePeers.get(fromPeerId);
-      if (!peer || !signal.sdp) return;
-      try {
-        await peer.setRemoteDescription({ type: "answer", sdp: signal.sdp });
-        await flushScreenShareCandidates(fromPeerId, peer);
-      } catch {
-        failScreenSharePeer(fromPeerId, "观看端无法完成屏幕共享直连协商");
-      }
-      return;
-    }
+    // S4-03（T10/H2）：原「Web 观看端接收发起端 answer」的 P2P 分支已随 Web 观众间
+    // 直连下线一并删除 —— Web 观众不再创建 `RTCPeerConnection`，不存在待应答的 offer。
 
-    if (screenShareActiveStreamId.value === streamId && stream.ownerPeerId === screenShareLocalPeerId()) {
+    if (screenShareActiveStreamId.value === streamId && stream.ownerPeerId === screenShareLocalPeerId() && fromPeerId.startsWith("ts-viewer-")) {
+      // 仅应答原生 TeamSpeak 观众（`ts-viewer-*`）的 P2P offer：P2P 状态仅服务该路径。
       const peer = screenSharePeers.get(fromPeerId) ?? createScreenSharePeer(streamId, fromPeerId, "owner");
       if (signal.kind !== "offer" || !signal.sdp) return;
       armScreenSharePeerTimer(fromPeerId);
@@ -2978,16 +3213,6 @@ export function useVoiceWebSocket() {
       }
       const videoTrack = stream.getVideoTracks()[0];
       if (!videoTrack) throw new Error("NO_VIDEO_TRACK");
-      try {
-        // Apply the cap once more after the browser's source picker returns.
-        // Some Chromium versions treat getDisplayMedia constraints as hints
-        // and only enforce the final capture size on the selected track.
-        await videoTrack.applyConstraints(videoConstraints);
-      } catch {
-        // The selected source can still be shared when a browser refuses an
-        // optional display-capture constraint; the actual settings remain
-        // visible in the WebRTC diagnostics panel.
-      }
       screenShareLocalStream = stream;
       // 显示采集轨默认按「文本/细节」语义编码 —— 清晰度优先，帧率第一个被牺牲。
       // 用户选了 >=30fps 说明要的是流畅（放视频/游戏），设成 motion；
@@ -3014,8 +3239,11 @@ export function useVoiceWebSocket() {
   function stopScreenShare(): void {
     screenShareStartGeneration += 1;
     if (screenShareStarting.value) screenShareStartCancelled = true;
-    if (screenShareActive.value && screenShareActiveStreamId.value) sendScreenShareMessage({ type: "screenShareStop", streamId: screenShareActiveStreamId.value });
+    // 只要已登记 streamId 就通知服务端停止：推流尚未完成（active 仍为 false）时
+    // 也必须回收服务端已建立的共享会话，避免悬挂。
+    if (screenShareActiveStreamId.value) sendScreenShareMessage({ type: "screenShareStop", streamId: screenShareActiveStreamId.value });
     closeAllScreenSharePeers();
+    releaseScreenShareProducers();
     screenShareLocalStream?.getTracks().forEach((track) => track.stop());
     screenShareLocalStream = null;
     screenShareStarting.value = false;
@@ -3036,6 +3264,8 @@ export function useVoiceWebSocket() {
   function leaveScreenShare(): void {
     if (screenShareViewingStreamId.value) sendScreenShareMessage({ type: "screenShareLeave", streamId: screenShareViewingStreamId.value });
     closeAllScreenSharePeers();
+    releaseScreenShareViewerConsumers();
+    screenShareViewerState.value = "idle";
     screenShareViewing.value = false;
     screenShareViewingStreamId.value = "";
     screenShareRemoteStream.value = null;
@@ -3043,9 +3273,11 @@ export function useVoiceWebSocket() {
 
   function stopScreenShareTransport(sendStop: boolean): void {
     screenShareStartGeneration += 1;
-    if (sendStop && screenShareActive.value && screenShareActiveStreamId.value) sendScreenShareMessage({ type: "screenShareStop", streamId: screenShareActiveStreamId.value });
+    if (sendStop && screenShareActiveStreamId.value) sendScreenShareMessage({ type: "screenShareStop", streamId: screenShareActiveStreamId.value });
     if (screenShareStarting.value) screenShareStartCancelled = true;
     closeAllScreenSharePeers();
+    releaseScreenShareProducers();
+    releaseScreenShareViewerConsumers();
     screenShareLocalStream?.getTracks().forEach((track) => track.stop());
     screenShareLocalStream = null;
     screenShareStarting.value = false;
@@ -3053,6 +3285,7 @@ export function useVoiceWebSocket() {
     screenShareStartCancelled = false;
     screenShareActive.value = false;
     screenShareActiveStreamId.value = "";
+    screenShareViewerState.value = "idle";
     screenShareViewing.value = false;
     screenShareViewingStreamId.value = "";
     screenShareRemoteStream.value = null;
@@ -3063,6 +3296,12 @@ export function useVoiceWebSocket() {
     if (!raw || typeof raw !== "object") return null;
     const value = raw as Partial<ScreenShareStream>;
     if (typeof value.streamId !== "string" || typeof value.ownerPeerId !== "string") return null;
+    const existing = screenShareStreams.find((candidate) => candidate.streamId === value.streamId);
+    // R7 / M1：定向管道 Producer ID 为惰性下发，广播态描述（screenShareList、部分广播）
+    // 不携带该字段。仅在传入描述显式携带 producerId 时才覆盖，否则保留既有条目中已持久化的
+    // 定向 ID，避免被列表刷新或广播冲掉。
+    const mergedVideoProducerId = typeof value.videoProducerId === "string" ? value.videoProducerId : existing?.videoProducerId;
+    const mergedAudioProducerId = typeof value.audioProducerId === "string" ? value.audioProducerId : existing?.audioProducerId;
     const stream: ScreenShareStream = {
       streamId: value.streamId,
       source: value.source === "teamspeak" ? "teamspeak" : "browser",
@@ -3074,10 +3313,15 @@ export function useVoiceWebSocket() {
       createdAt: typeof value.createdAt === "number" ? value.createdAt : Date.now(),
       viewerCount: typeof value.viewerCount === "number" ? value.viewerCount : 0,
       viewers: normalizeScreenShareViewers(value.viewers),
+      ...(typeof mergedVideoProducerId === "string" ? { videoProducerId: mergedVideoProducerId } : {}),
+      ...(typeof mergedAudioProducerId === "string" ? { audioProducerId: mergedAudioProducerId } : {}),
     };
-    const index = screenShareStreams.findIndex((candidate) => candidate.streamId === stream.streamId);
-    if (index >= 0) screenShareStreams.splice(index, 1, stream);
-    else screenShareStreams.push(stream);
+    if (existing) {
+      // 原地合并：保留既有对象引用（响应式追踪与下游持有引用不失效），逐字段写回。
+      Object.assign(existing, stream);
+      return existing;
+    }
+    screenShareStreams.push(stream);
     return stream;
   }
 
@@ -3141,18 +3385,28 @@ export function useVoiceWebSocket() {
         } else if (msg.webrtcAvailable === true && typeof RTCPeerConnection !== "undefined" && ws.value) {
           void startWebRtcTransport(connectionSequence, ws.value).catch((error: unknown) => { setMicrophoneError(error); });
         } else {
-          // 走兼容（WS）通道：缺 WebCodecs 时上行还在、但听不到任何人，必须先说清楚。
-          if (compatibilityPlaybackUnavailable()) {
-            setAudioNotice("COMPATIBILITY_PLAYBACK_UNSUPPORTED", COMPATIBILITY_PLAYBACK_NOTICE);
-          }
           void ensureMicrophone().catch((error: unknown) => { setMicrophoneError(error); });
         }
         sendScreenShareMessage({ type: "screenShareList" });
         break;
-      case "screenShareList":
-        screenShareStreams.length = 0;
-        if (Array.isArray(msg.streams)) for (const raw of msg.streams) upsertScreenShareStream(raw);
+      case "screenShareList": {
+        // M1 必修项：禁止全量清空（原 `screenShareStreams.length = 0`）。列表应答走广播态
+        // 描述、不携带定向 producerId，清空会冲掉已 pipe 的 videoProducerId / audioProducerId，
+        // 导致拉流句柄丢失。改为按 streamId 精确调谐：移除远端已下线的流，原地合并仍存在的流，
+        // 追加新入流。
+        const incoming = Array.isArray(msg.streams) ? msg.streams : [];
+        const incomingIds = new Set<string>();
+        for (const raw of incoming) {
+          if (!raw || typeof raw !== "object") continue;
+          const streamId = (raw as Partial<ScreenShareStream>).streamId;
+          if (typeof streamId === "string" && streamId) incomingIds.add(streamId);
+        }
+        for (let i = screenShareStreams.length - 1; i >= 0; i -= 1) {
+          if (!incomingIds.has(screenShareStreams[i].streamId)) screenShareStreams.splice(i, 1);
+        }
+        for (const raw of incoming) upsertScreenShareStream(raw);
         break;
+      }
       case "screenShareStarted": {
         const stream = upsertScreenShareStream(msg.stream);
         if (!stream) break;
@@ -3160,8 +3414,8 @@ export function useVoiceWebSocket() {
           const requestId = typeof msg.requestId === "string" ? msg.requestId : "";
           const isCurrentStart = Boolean(screenSharePendingStartId) && requestId === screenSharePendingStartId && !screenShareStartCancelled;
           screenSharePendingStartId = "";
-          screenShareStarting.value = false;
           if (!isCurrentStart) {
+            screenShareStarting.value = false;
             sendScreenShareMessage({ type: "screenShareStop", streamId: stream.streamId });
             screenShareLocalStream?.getTracks().forEach((track) => track.stop());
             screenShareLocalStream = null;
@@ -3169,8 +3423,10 @@ export function useVoiceWebSocket() {
             if (staleIndex >= 0) screenShareStreams.splice(staleIndex, 1);
             break;
           }
-          screenShareActive.value = true;
+          // T8：登记 streamId 后异步走 M2 send 就绪守卫 + 双轨 produce；发起端状态机
+          // 由 startScreenShareProducers 在推流成功时从 starting 推进到 active。
           screenShareActiveStreamId.value = stream.streamId;
+          void startScreenShareProducers(stream.streamId);
         }
         break;
       }
@@ -3188,6 +3444,7 @@ export function useVoiceWebSocket() {
         if (index >= 0) screenShareStreams.splice(index, 1);
         if (screenShareActiveStreamId.value === streamId) {
           closeAllScreenSharePeers();
+          releaseScreenShareProducers();
           screenShareStarting.value = false;
           screenSharePendingStartId = "";
           screenShareStartCancelled = false;
@@ -3197,10 +3454,27 @@ export function useVoiceWebSocket() {
           screenShareLocalStream = null;
         }
         if (screenShareViewingStreamId.value === streamId) {
+          // T10：与 `screenShareVideoClosed` 协同，统一走观看态本地收尾（释放 Consumer/播放器）。
           closeAllScreenSharePeers();
-          screenShareViewing.value = false;
-          screenShareViewingStreamId.value = "";
-          screenShareRemoteStream.value = null;
+          resetScreenShareViewing();
+        }
+        break;
+      }
+      case "screenShareVideoClosed": {
+        // R4/S4-03（T10）：源屏幕视频 Producer 关闭的定向通知（服务端在级联关闭该观众的
+        // PipeProducer/Consumer 之后下发）。主驱动前端清理：清空失效 producerId、释放
+        // Consumer 与播放器并重置状态机；与 `screenShareStopped` 协同（后者覆盖整流结束）。
+        const streamId = String(msg.streamId || "");
+        const stream = screenShareStreams.find((candidate) => candidate.streamId === streamId);
+        if (stream) {
+          // 视频轨为必需项：视频 Producer 关闭即整条观看链路失效，音频 producerId 同步作废，
+          // 避免 `screenShareProducers` 后续误触发续拉流悬挂。
+          delete stream.videoProducerId;
+          delete stream.audioProducerId;
+        }
+        if (screenShareViewingStreamId.value === streamId) {
+          // 保留流列表条目（等 `screenShareStopped` 收尾），仅退出观看态并释放本地资源。
+          resetScreenShareViewing();
         }
         break;
       }
@@ -3208,6 +3482,24 @@ export function useVoiceWebSocket() {
         const stream = upsertScreenShareStream(msg.stream);
         if (!stream) break;
         void startScreenShareViewer(stream);
+        break;
+      }
+      case "screenShareProducers": {
+        // T9：观众专属的定向管道 Producer 通知（video 先推、audio 后到时补齐）。
+        const streamId = String(msg.streamId || "");
+        const stream = screenShareStreams.find((candidate) => candidate.streamId === streamId);
+        if (!stream) break;
+        // 按 streamId 原地补齐：仅在显式携带时覆盖，与 upsert 合并语义一致。
+        if (typeof msg.videoProducerId === "string" && msg.videoProducerId) stream.videoProducerId = msg.videoProducerId;
+        if (typeof msg.audioProducerId === "string" && msg.audioProducerId) stream.audioProducerId = msg.audioProducerId;
+        if (screenShareViewingStreamId.value !== streamId) break;
+        if (screenShareViewerState.value === "waiting-producer" && stream.videoProducerId) {
+          // 等待态被唤醒：自动触发续拉流。
+          void startScreenShareSfuViewer(stream);
+        } else if (screenShareViewerState.value === "playing" && stream.audioProducerId && !screenShareAudioConsumer) {
+          // 视频先到、音频后到的 merge 场景：补拉音频轨并入现有 MediaStream。
+          void consumeScreenShareAudioTrack(stream);
+        }
         break;
       }
       case "screenShareNativeViewerJoined":
@@ -3230,15 +3522,20 @@ export function useVoiceWebSocket() {
         screenShareErrorCode.value = typeof msg.code === "string" ? msg.code : "";
         screenShareError.value = String(msg.message || "屏幕共享操作失败");
         if (screenShareStarting.value) {
+          releaseScreenShareProducers();
           screenShareStarting.value = false;
           screenSharePendingStartId = "";
           screenShareStartCancelled = false;
+          screenShareActive.value = false;
+          screenShareActiveStreamId.value = "";
           screenShareLocalStream?.getTracks().forEach((track) => track.stop());
           screenShareLocalStream = null;
         }
         if (screenShareViewing.value) {
           if (screenShareViewingStreamId.value) sendScreenShareMessage({ type: "screenShareLeave", streamId: screenShareViewingStreamId.value });
           closeAllScreenSharePeers();
+          releaseScreenShareViewerConsumers();
+          screenShareViewerState.value = "idle";
           screenShareViewing.value = false;
           screenShareViewingStreamId.value = "";
           screenShareRemoteStream.value = null;
@@ -3253,7 +3550,6 @@ export function useVoiceWebSocket() {
       case "memberLeave": {
         const clientId = Number(msg.id);
         clearSpeaking(clientId);
-        clearRemotePlayback(clientId);
         const index = members.findIndex((member) => member.id === clientId);
         if (index >= 0) members.splice(index, 1);
         break;
@@ -3482,18 +3778,6 @@ export function useVoiceWebSocket() {
     }
   }
 
-  function handleAudioFrame(data: Uint8Array): void {
-    // WebRTC carries the realtime downlink after negotiation. Ignore any
-    // in-flight fallback WebSocket packets so a transport switch cannot
-    // produce duplicate or delayed playback.
-    if (webrtcActive.value) return;
-    if (data.length < 4) return;
-    const clientId = (data[1] << 8) | data[2];
-    if (clientId === state.tsClientId) return;
-    markSpeaking(clientId);
-    playAudioFrame(clientId, data.slice(3));
-  }
-
   function sendCmd(type: string, payload: Record<string, unknown> = {}, requestId = ""): void {
     if (ws.value?.readyState === WebSocket.OPEN) ws.value.send(JSON.stringify({ type, payload, ...(requestId ? { requestId } : {}) }));
   }
@@ -3578,8 +3862,8 @@ export function useVoiceWebSocket() {
    * 实际走的那条 UDP 路径；丢包与抖动取自入站 RTP 的累计计数器。这条路径与
    * WebSocket 控制通道完全独立 —— WebRTC 启用后音频不再经过 WebSocket。
    *
-   * 返回 null 表示当前没有可测的媒体路径：WebRTC 未启用（兼容传输），或尚未
-   * 协商出候选对。调用方应把 null 当作"不可测"而不是"延迟为 0"。
+   * 返回 null 表示当前没有可测的媒体路径：WebRTC 未启用，或尚未协商出候选对。
+   * 调用方应把 null 当作"不可测"而不是"延迟为 0"。
    */
   async function sampleMediaPath(): Promise<MediaPathStats | null> {
     const client = mediaClient;
@@ -3686,7 +3970,6 @@ export function useVoiceWebSocket() {
     microphoneMuted.value = muted;
     voxAttack = 0;
     voxRelease = 0;
-    accumLen = 0;
     if (webrtcActive.value) micStream?.getAudioTracks().forEach((track) => { track.enabled = !muted; });
     if (webrtcMixMicGain) webrtcMixMicGain.gain.value = muted ? 0 : inputVolume.value;
     // 上行 Producer：静音时本地先行 pause（停发 RTP，节省上行带宽），解除后 resume；
@@ -3764,8 +4047,6 @@ export function useVoiceWebSocket() {
       storedVolumesByUid[member.uid] = normalized;
       void saveAudioPreferences();
     }
-    const gain = remoteGains.get(clientId);
-    if (gain) gain.gain.value = normalized * effectiveOutputVolume();
     // 动态播放图：成员音量直接落在该成员的 GainNode 上。只写 volumes 不会立刻
     // 改变声音 —— 必须同步更新节点增益。缺这一步时，改音量要等到下一次
     // applyOutputVolume()（例如切换自己的输出静音）才生效。
@@ -3785,20 +4066,28 @@ export function useVoiceWebSocket() {
 
   async function setNoiseSuppressionEnabled(enabled: boolean): Promise<void> {
     if (noiseSuppressionEnabled.value === enabled) return;
-    const shouldRestartWebRtc = webrtcActive.value && Boolean(ws.value);
+    const previousEnabled = noiseSuppressionEnabled.value;
     noiseSuppressionEnabled.value = enabled;
     void saveAudioPreferences();
     if (!micStream) return;
     try {
-      if (shouldRestartWebRtc) stopWebRtcTransport();
+      // 降噪开关只重建本地采集管线，再用 replaceTrack 原地换轨，传输层与下行
+      // Consumer 全程不断，避免切换降噪后听不到其他成员。
       await startMicrophone();
-      if (shouldRestartWebRtc && ws.value) await startWebRtcTransport(connectionSequence, ws.value);
+      if (micProducer && !micProducer.closed) await replaceWebRtcAudioTrack();
     } catch (error) {
-      // Same trap as setInputDevice: the transport was already torn down above,
-      // so a failure here must rebuild the path (including telling the gateway to
-      // drop the stale peer) rather than only reporting the error.
-      setMicrophoneError(error);
-      await recoverAudioAfterFailedInputChange(shouldRestartWebRtc);
+      // 降噪节点重建或换轨失败：回滚开关与偏好并尽力恢复前置采集图，通话不因
+      // 降噪切换断连；恢复成功时以原异常作非致命提示，失败则以恢复异常为准。
+      noiseSuppressionEnabled.value = previousEnabled;
+      void saveAudioPreferences();
+      try {
+        await startMicrophone();
+        if (micProducer && !micProducer.closed) await replaceWebRtcAudioTrack();
+        setMicrophoneError(error);
+      } catch (recoveryError) {
+        setMicrophoneError(recoveryError);
+      }
+      throw error;
     }
   }
 
@@ -4025,6 +4314,7 @@ export function useVoiceWebSocket() {
     screenShareActiveStreamId,
     screenShareViewing,
     screenShareViewingStreamId,
+    screenShareViewerState,
     screenShareRemoteStream,
     screenShareError,
     screenShareErrorCode,
@@ -4069,5 +4359,6 @@ export function useVoiceWebSocket() {
     measureLatency,
     sampleMediaPath,
     webrtcActive,
+    retryWebRtc,
   };
 }

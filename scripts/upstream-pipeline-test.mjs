@@ -9,7 +9,8 @@
  *   ③ 静音同步：`applyMicrophoneMute` 调 `setInputMuted` 并驱动丢包护栏；
  *   ④ 真实 mediasoup 内存回环：Router 上 DirectTransport Producer → 上行管线
  *      DirectTransport Consumer `on('rtp')` → Stub TSClient，逐字节一致 + codec 矩阵；
- *   ⑤ WS 兼容（降级）通道：1920B 定长 PCM + `@discordjs/opus` 编码链路保留。
+ *   ⑤ 纯 WebRTC 上行回归：入站二进制帧硬拦截（拒绝且零音频发送）+ 生产源码
+ *      中 WS 降级音频通道残留清零断言。
  *
  * 只读红线（规格 §10.1）：本脚本严格使用 Stub 与内存回环，**绝不连接生产 TS3**。
  * 同时为满足审查红线 `! grep -rqE "\.sendVoice\s*\(" scripts/`，脚本内**不出现**
@@ -26,10 +27,8 @@ const {
   applyMicrophoneMute,
   OPUS_VOICE_CODEC,
   OPUS_MUSIC_CODEC,
-  AUDIO_FRAME_BYTES,
 } = await import("../src/server/voice-bridge.ts");
 const { packetizeOpusFrame } = await import("../src/server/speaker-producer-map.ts");
-const { createOpusEncoder } = await import("../src/server/opus-codec.ts");
 
 const results = [];
 const check = (name, ok, detail) => {
@@ -120,7 +119,6 @@ try {
   console.log("=== ① 常量与 codec 矩阵 ===");
   check("TS3 codec 常量：voice=4 / music=5", OPUS_VOICE_CODEC === 4 && OPUS_MUSIC_CODEC === 5,
     `voice=${OPUS_VOICE_CODEC}, music=${OPUS_MUSIC_CODEC}`);
-  check("WS 降级通道定长 PCM 帧为 1920B", AUDIO_FRAME_BYTES === 1920, `AUDIO_FRAME_BYTES=${AUDIO_FRAME_BYTES}`);
 
   // ───────────────────── ② extractOpusPayload ─────────────────────
   console.log("\n=== ② extractOpusPayload（跳过 CSRC / 扩展 / padding）===");
@@ -303,21 +301,36 @@ try {
     stub.calls.filter((c) => c.kind === "whisper").length === 1 && lastCall().kind === "voice",
     `whisper 调用数=${stub.calls.filter((c) => c.kind === "whisper").length}`);
 
-  // ───────────────────── ⑤ WS 兼容（降级）通道保留 ─────────────────────
-  console.log("\n=== ⑤ WS 兼容（降级）通道 ===");
+  // ───────────────────── ⑤ 纯 WebRTC 上行与二进制拦截回归 ─────────────────────
+  console.log("\n=== ⑤ 纯 WebRTC 上行与二进制拦截 ===");
   {
-    const encoder = createOpusEncoder();
-    const pcm = Buffer.alloc(AUDIO_FRAME_BYTES);
-    for (let i = 0; i < AUDIO_FRAME_BYTES / 2; i++) pcm.writeInt16LE(Math.round(Math.sin(i / 20) * 8000), i * 2);
-    const opus = encoder.encode(pcm);
-    check("1920B PCM 经 @discordjs/opus 编码为非空 Opus 帧", Buffer.isBuffer(opus) && opus.length > 0, `${opus.length} bytes`);
-    const decoded = encoder.decode(opus);
-    check("Opus 可解码回 PCM（降级通道闭环可用）", Buffer.isBuffer(decoded) && decoded.length > 0, `${decoded.length} bytes`);
-
     const source = readFileSync(new URL("../src/server/voice-bridge.ts", import.meta.url), "utf8");
-    check("WS 二进制管线原样保留（1920B 校验 + opusEncoder.encode）",
-      source.includes("frame.length !== AUDIO_FRAME_BYTES") && source.includes("opusEncoder.encode(frame)"),
-      "voice-bridge.ts 二进制分支未改动");
+
+    // 二进制拦截：`ws.on("message")` 的二进制分支必须直接回协议错误并 return，
+    // 分支体内不得出现任何音频发送 / 编码调用——这是"二进制帧不产生音频发送"的静态证据。
+    const branchStart = source.indexOf("if (isBinary)");
+    const branchEnd = branchStart === -1 ? -1 : source.indexOf("const rawMessage", branchStart);
+    const binaryBranch = branchStart !== -1 && branchEnd > branchStart ? source.slice(branchStart, branchEnd) : "";
+    check("二进制帧硬拦截：回 UNSUPPORTED_BINARY_FRAME 后 return，分支内零音频发送/编码调用",
+      binaryBranch.includes('"UNSUPPORTED_BINARY_FRAME"') && binaryBranch.includes("return")
+        && !/sendVoice|sendWhisper|\.encode\(/.test(binaryBranch),
+      binaryBranch ? "分支仅含协议错误回执" : "未定位到 isBinary 分支");
+
+    // 源码卫生：WS 降级音频通道的定长 PCM 校验与编码器引用必须全部退役。
+    const retired = ["AUDIO_FRAME_BYTES", "opusEncoder", "createOpusEncoder"].filter((token) => source.includes(token));
+    check("WS 降级音频通道残留（AUDIO_FRAME_BYTES/opusEncoder/createOpusEncoder）已清零",
+      retired.length === 0, retired.length ? `残留=${retired.join(", ")}` : "零残留");
+
+    // 行为断言：即便把一段 1920B 原始 PCM（静音，首字节版本位非 2）直接投给纯 WebRTC
+    // 上行管线，也必须因非 RTP 而丢弃，不产生任何 TS3 发送调用。
+    const stub = makeStubTarget();
+    const pipeline = new UpstreamAudioPipeline(stub);
+    openPipelines.push(pipeline);
+    const before = stub.calls.length;
+    pipeline.handleRtpPacket(Buffer.alloc(1920));
+    check("原始 1920B PCM 投喂纯 WebRTC 上行管线：零 TS3 发送调用",
+      stub.calls.length === before, `新增调用=${stub.calls.length - before}`);
+
     check("上行管线显式调用 consumer.resume()", source.includes("consumer.resume()"), "S4 验收口径");
   }
 } catch (error) {

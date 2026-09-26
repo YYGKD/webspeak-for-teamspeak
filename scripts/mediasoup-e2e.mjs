@@ -119,7 +119,8 @@ async function loadSourceModule(relativePath) {
 // 1. 依赖装载（只读源码，不触达任何 TS3 生产连接）
 // ─────────────────────────────────────────────────────────────────────────────
 const { RTCPeerConnection, useOPUS } = await import("werift");
-const { createOpusEncoder, createOpusDecoder } = await loadSourceModule("src/server/opus-codec.ts");
+// Opus 编解码器已随依赖解耦迁到测试侧，生产源码树不再直接依赖 @discordjs/opus。
+const { createOpusEncoder, createOpusDecoder } = await import("./lib/opus-codec.mjs");
 const {
   MEDIA_PORT_RANGE,
   createMediaWorker,

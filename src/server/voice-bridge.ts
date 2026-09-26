@@ -19,28 +19,15 @@ import { isRecoverable, reconnectDelayMs, reconnectWindowOpen } from "./reconnec
 import { generateTurnUserid, resolveIceServers } from "./ice-credentials.js";
 import { pingTeamSpeakSession } from "./network-probe.js";
 import type { AccelerationRelayOptions, ConfiguredAccelerationRelay } from "./acceleration-relay.js";
-import { createOpusEncoder } from "./opus-codec.js";
 import type { WebRtcAudioOptions } from "./webrtc-config.js";
 import { createMediaRouter, createMediaWebRtcTransport, getMediaWorker } from "./media-worker.js";
 import { DIRECT_TRANSPORT_MAX_SEND_MESSAGE_SIZE, SpeakerProducerMap, resolveMaxSpeakers } from "./speaker-producer-map.js";
 import type { Consumer, DirectTransport, DtlsParameters, MediaKind, Producer, Router, RtpCapabilities, RtpParameters, WebRtcTransport } from "mediasoup/types";
 import { normalizeScreenShareIceServers, parseScreenShareMessage, type ScreenShareClientMessage, type ScreenShareIceServer, type ScreenSharePeerSignal, type ScreenShareStreamDescription, type ScreenShareViewerDescription } from "./screen-share.js";
+import { SCREEN_SHARE_MAX_WEB_VIEWERS } from "../constants.js";
 
 // 90s（原 30s）：防跨境抖动拆连，运维热补丁固化。
 const HEARTBEAT_INTERVAL_MS = 90_000;
-/**
- * WS 兼容（降级）通道的定长 PCM 帧：20ms 单声道 48kHz s16le。
- * S4 起 WebRTC 上行改走 mediasoup DirectTransport Consumer，但这条
- * 二进制通道**原样保留**，作为 WebRTC 禁用/协商失败时的降级路径。
- */
-export const AUDIO_FRAME_BYTES = 1_920;
-// A browser audio frame is 20 ms of mono 48 kHz PCM. Keep the server-side
-// WebSocket egress queue small enough that a slow browser cannot turn old
-// voice into seconds of latency. Opus frames are variable-sized, so this is
-// deliberately a conservative byte backpressure guard for roughly 10–20
-// small Opus frames; the browser also enforces a time-based playback limit
-// before scheduling decoded audio.
-const MAX_SERVER_AUDIO_BUFFERED_BYTES = 4_096;
 
 /** TS3 上行语音 codec：4 = Opus Voice（普通语音）。 */
 export const OPUS_VOICE_CODEC = 4;
@@ -133,6 +120,22 @@ export interface MicrophoneMuteTarget {
 export async function applyMicrophoneMute(target: MicrophoneMuteTarget, muted: boolean): Promise<void> {
   await target.tsClient.setInputMuted(muted);
   target.microphoneMuted = muted;
+}
+
+/**
+ * `mediaProduce` 前置分流判据（S2-03 / B3）。
+ *
+ * 屏幕共享的两条轨（`appData.mediaType` 为 `"screen-video"` / `"screen-audio"`）
+ * 与任意 `kind === "video"` 的上行 Producer 一律判定为屏幕流：严禁进入 TS3 语音
+ * 上行管线（`UpstreamAudioPipeline`），也不参与 `entry.microphoneMuted` /
+ * `entry.accompanimentActive` 的初值回写——这两个字段只描述麦克风。
+ *
+ * 纯函数、无副作用；由 `handleMediaMessage` 的 `mediaProduce` 分支与验收脚本
+ * （`scripts/screen-share-sfu-test.mjs` §8.3-6）共用，保证两侧判据同源不漂移。
+ */
+export function isScreenShareProducer(appData: Record<string, unknown> | undefined, kind: MediaKind): boolean {
+  const mediaType = appData?.mediaType;
+  return mediaType === "screen-video" || mediaType === "screen-audio" || kind === "video";
 }
 
 /**
@@ -286,30 +289,14 @@ export interface AdminSessionSummary {
 }
 
 export interface AudioFlowStats {
-  ingressFrames: number;
-  ingressDroppedFrames: number;
-  ingressFirstAt: number | null;
-  ingressLastAt: number | null;
-  ingressMaxGapMs: number;
-  tsSendFrames: number;
-  tsSendErrors: number;
-  tsSendFirstAt: number | null;
-  tsSendLastAt: number | null;
-  tsSendMaxGapMs: number;
-  tsEncodeMaxMs: number;
   tsReceiveFrames: number;
   tsReceiveFirstAt: number | null;
   tsReceiveLastAt: number | null;
   tsReceiveMaxGapMs: number;
   egressFrames: number;
-  egressDroppedFrames: number;
   egressFirstAt: number | null;
   egressLastAt: number | null;
   egressMaxGapMs: number;
-  egressSentFirstAt: number | null;
-  egressSentLastAt: number | null;
-  egressSentMaxGapMs: number;
-  egressPeakBufferedBytes: number;
   egressFramesByClient: Record<string, number>;
 }
 
@@ -373,8 +360,6 @@ interface WebClientEntry {
   members: Map<number, ChannelMember>;
   avatarCache: Map<string, string | null>;
   eventLog: ServerEvent[];
-  opusEncoder: { encode(pcm: Buffer): Buffer } | null;
-  opusEncoderWarnedAt: number; // Opus 编码器不可用告警的时间戳，用于限流避免反复刷屏
   whisperTargetIds: Set<number>;
   whisperActive: boolean;
   /**
@@ -389,7 +374,7 @@ interface WebClientEntry {
   audio: AudioFlowStats;
   /**
    * S3 mediasoup 媒体会话：浏览器发出 `mediaGetRtpCapabilities` 时惰性建立。
-   * 为 null 表示该会话尚未启用 WebRTC 媒体（此时走 WS 兼容通道）。
+   * 为 null 表示该会话尚未启用 WebRTC 媒体（此时下行音频安全忽略）。
    */
   media: MediaSession | null;
   /** 媒体会话创建在途（并发信令共享同一次创建）。 */
@@ -417,6 +402,17 @@ interface ScreenStreamRecord extends ScreenShareStreamDescription {
   teamSpeakStreamId?: string;
   /** Native TS6 viewer client ids paired with a browser-owned stream. */
   nativeViewerClids: Set<number>;
+  /**
+   * 发起端 Router 上的源 Producer ID（屏幕视频 / 屏幕音频）。仅 `source === "browser"`
+   * 的流会填充；尚未推流时缺省，`ensureScreenSharePipe` 据此判定观众等待态。
+   */
+  sfuVideoProducerId?: string;
+  sfuAudioProducerId?: string;
+  /**
+   * viewerEntryId → 该观众 Router 上的管道 Producer ID（`pipeToRouter` `keepId:false`
+   * 之后生成的新 UUID）。按轨道独立存放（R2）：视频与音频可分别就绪、分别补齐。
+   */
+  pipedByViewerEntryId: Map<string, { videoProducerId?: string; audioProducerId?: string }>;
 }
 
 // Stream ids are scoped to a TeamSpeak server. Keep the target in the key so
@@ -429,6 +425,12 @@ export class VoiceBridge {
   private readonly sessionManager = new SessionManager();
   private readonly entries = new Map<string, WebClientEntry>();
   private readonly screenStreams = new Map<string, ScreenStreamRecord>();
+  /**
+   * (streamId, viewerEntryId) → 进行中的 pipe Promise（R3 并发去重闸）。
+   * 与 `stream.pipedByViewerEntryId` 按轨缓存构成"双闸"：任意并发/重复调用下，
+   * 至多对同一 (Producer, Router) 对执行一次 `pipeToRouter`，杜绝 double-pipe。
+   */
+  private readonly screenSharePipeInflight = new Map<string, Promise<{ videoProducerId?: string; audioProducerId?: string } | null>>();
   private readonly screenStreamDiscoveryTargets = new Set<string>();
   private readonly identityLeases = new IdentityLeaseStore();
   private wss: WebSocketServer | null = null;
@@ -534,8 +536,6 @@ export class VoiceBridge {
         members: new Map(),
         avatarCache: new Map(),
         eventLog: [],
-        opusEncoder: null,
-        opusEncoderWarnedAt: 0,
         whisperTargetIds: new Set(),
         whisperActive: false,
         microphoneMuted: false,
@@ -552,13 +552,6 @@ export class VoiceBridge {
         screenPeerId: entryId,
       };
       this.entries.set(entryId, entry!);
-      try {
-        entry!.opusEncoder = createOpusEncoder();
-      } catch (error: unknown) {
-        this.logger.error({ err: error, entryId }, "Could not create Opus encoder");
-        void this.teardown(entryId, "teamSpeak-connect-failed");
-        return;
-      }
 
       let tsReady = false;
       let selfId = 0;
@@ -1053,7 +1046,7 @@ export class VoiceBridge {
         entry!.audio.tsReceiveFirstAt ??= receivedAt;
         entry!.audio.tsReceiveLastAt = receivedAt;
         entry!.audio.tsReceiveFrames++;
-        if (ws.readyState !== WebSocket.OPEN || data.clientId === selfId) return;
+        if (data.clientId === selfId) return;
         const now = receivedAt;
         if (entry!.audio.egressLastAt !== null) entry!.audio.egressMaxGapMs = Math.max(entry!.audio.egressMaxGapMs, now - entry!.audio.egressLastAt);
         entry!.audio.egressFirstAt ??= now;
@@ -1064,31 +1057,9 @@ export class VoiceBridge {
         // clientId 动态发布；浏览器收到 newSpeakerProducer 后自行 consume。
         // 首帧在 ingest() 内部等资源创建完成再注入 Router，首帧不丢。
         const media = entry!.media;
-        if (media) {
-          void media.speakerProducers.ingest(data.clientId, data.data);
-          entry!.audio.egressFrames++;
-          return;
-        }
-        const packet = Buffer.allocUnsafe(3 + data.data.length);
-        packet[0] = data.codec;
-        packet.writeUInt16BE(data.clientId, 1);
-        data.data.copy(packet, 3);
-        const bufferedBytes = ws.bufferedAmount;
-        entry!.audio.egressPeakBufferedBytes = Math.max(entry!.audio.egressPeakBufferedBytes, bufferedBytes);
-        if (bufferedBytes > MAX_SERVER_AUDIO_BUFFERED_BYTES) {
-          entry!.audio.egressDroppedFrames++;
-          return;
-        }
-        try {
-          ws.send(packet);
-          entry!.audio.egressFrames++;
-          const sentAt = Date.now();
-          if (entry!.audio.egressSentLastAt !== null) entry!.audio.egressSentMaxGapMs = Math.max(entry!.audio.egressSentMaxGapMs, sentAt - entry!.audio.egressSentLastAt);
-          entry!.audio.egressSentFirstAt ??= sentAt;
-          entry!.audio.egressSentLastAt = sentAt;
-        } catch {
-          entry!.audio.egressDroppedFrames++;
-        }
+        if (!media) return;
+        void media.speakerProducers.ingest(data.clientId, data.data);
+        entry!.audio.egressFrames++;
       });
 
       tsClient.on("textMessage", (message) => {
@@ -1147,54 +1118,25 @@ export class VoiceBridge {
       ws.on("pong", () => { if (entry) entry.isAlive = true; });
       ws.on("message", (data: Buffer | string, isBinary: boolean) => {
         if (isBinary) {
-          const frame = typeof data === "string" ? Buffer.from(data) : data;
-          if (!tsReady || frame.length !== AUDIO_FRAME_BYTES) {
-            entry!.audio.ingressDroppedFrames++;
-            sendProtocolError(sendJson, "INVALID_AUDIO_FRAME", "音频帧格式无效");
-            return;
-          }
-          const now = Date.now();
-          if (entry!.audio.ingressLastAt !== null) entry!.audio.ingressMaxGapMs = Math.max(entry!.audio.ingressMaxGapMs, now - entry!.audio.ingressLastAt);
-          entry!.audio.ingressFirstAt ??= now;
-          entry!.audio.ingressLastAt = now;
-          entry!.audio.ingressFrames++;
-          const encodeStartedAt = Date.now();
-          try {
-            if (entry!.opusEncoder) {
-              const encoded = entry!.opusEncoder.encode(frame);
-              const encodedAt = Date.now();
-              entry!.audio.tsEncodeMaxMs = Math.max(entry!.audio.tsEncodeMaxMs, encodedAt - encodeStartedAt);
-              if (entry!.whisperActive && entry!.whisperTargetIds.size) tsClient.sendWhisper(encoded, [...entry!.whisperTargetIds], 4);
-              else tsClient.sendVoice(encoded, 4);
-              const sentAt = Date.now();
-              if (entry!.audio.tsSendLastAt !== null) entry!.audio.tsSendMaxGapMs = Math.max(entry!.audio.tsSendMaxGapMs, sentAt - entry!.audio.tsSendLastAt);
-              entry!.audio.tsSendFirstAt ??= sentAt;
-              entry!.audio.tsSendLastAt = sentAt;
-              entry!.audio.tsSendFrames++;
-            } else {
-              // Opus 编码器不可用（初始化失败或销毁后仍有帧在途）：显式告知浏览器
-              // 而不是静默丢帧，5 秒限流避免高频告警刷屏。
-              // The Opus encoder is unavailable (init failed or torn down while
-              // frames are still in flight): say it instead of dropping silently.
-              const warnedAt = entry!.opusEncoderWarnedAt;
-              if (Date.now() - warnedAt > 5_000) {
-                entry!.opusEncoderWarnedAt = Date.now();
-                sendJson({ type: "audioError", code: "AUDIO_ENCODER_UNAVAILABLE", detail: "Opus encoder unavailable" });
-              }
-            }
-          } catch {
-            // A frame arriving during shutdown is safe to discard.
-            entry!.audio.tsSendErrors++;
-          }
+          // 上行 WS 二进制音频通道已退役：WebRTC（mediasoup）是唯一的音频传输
+          // 路径，这里对任何入站二进制帧硬拦截，明确回一个协议错误而不是静默
+          // 丢弃，便于旧客户端定位问题。
+          sendProtocolError(sendJson, "UNSUPPORTED_BINARY_FRAME", "已退役 WebSocket 二进制音频传输");
           return;
         }
 
         const rawMessage = typeof data === "string" ? data : data.toString("utf-8");
-        // S6 起服务端不再维护浏览器 WebRTC 对端会话（媒体统一由 mediasoup
-        // DirectTransport 承载）。`webrtcStop` 是旧客户端在回退到兼容通道时
-        // 仍会发送的遗留信令：这里静默忽略，避免把它当成未知消息回一个错误帧
-        // （否则每次回退都会在界面上弹一次报错）。
-        if (isLegacyWebRtcStopMessage(rawMessage)) return;
+        try {
+          const parsed = JSON.parse(rawMessage);
+          if (parsed && typeof parsed === "object" && parsed.type === "webrtcStop") {
+            const payload = (parsed.payload as Record<string, unknown>) ?? {};
+            this.logger.warn({ entryId, reason: payload.reason, retries: payload.retries }, "Client reported WebRTC stopped / unavailable");
+            return;
+          }
+        } catch {
+          // ignore JSON parse errors here, let subsequent parsers handle them
+        }
+
         const screenShareMessage = parseScreenShareMessage(rawMessage);
         if (screenShareMessage) {
           if ("error" in screenShareMessage) {
@@ -1205,7 +1147,7 @@ export class VoiceBridge {
             sendProtocolError(sendJson, "SESSION_NOT_READY", "TeamSpeak 会话尚未就绪");
             return;
           }
-          this.handleScreenShareMessage(entry!, screenShareMessage, sendJson);
+          void this.handleScreenShareMessage(entry!, screenShareMessage, sendJson);
           return;
         }
         const command = parseClientCommand(rawMessage);
@@ -1336,7 +1278,6 @@ export class VoiceBridge {
     }
     entry.clientStateRefreshedAt.clear();
     entry.avatarFlagByUid.clear();
-    entry.opusEncoder = null;
     const media = entry.media;
     entry.media = null;
     entry.mediaPending = null;
@@ -1516,14 +1457,7 @@ export class VoiceBridge {
             sendMediaError(sendJson, command.requestId, "MEDIA_TRANSPORT_NOT_FOUND", "媒体传输不存在或已关闭");
             return;
           }
-          // 浏览器在 appData 里携带初始 muted / accompanimentActive（替代旧 offer
-          // 内字段），作为网关侧状态初值；后续由 setMicrophoneMuted /
-          // setAccompanimentActive 命令热更新。
           const produceAppData = command.payload.appData as Record<string, unknown> | undefined;
-          if (produceAppData) {
-            if (typeof produceAppData.muted === "boolean") entry.microphoneMuted = produceAppData.muted;
-            if (typeof produceAppData.accompanimentActive === "boolean") entry.accompanimentActive = produceAppData.accompanimentActive;
-          }
           const producer = await transport.produce({
             kind: (command.payload.kind as MediaKind | undefined) ?? "audio",
             rtpParameters: command.payload.rtpParameters as RtpParameters,
@@ -1531,6 +1465,22 @@ export class VoiceBridge {
           });
           session.producers.set(producer.id, producer);
           producer.on("transportclose", () => { session.producers.delete(producer.id); });
+          // S2-03（B3）前置分流：屏幕视频 / 屏幕音频（含任意 video 轨）绝不进入
+          // TS3 语音上行管线——麦克风流是唯一允许进入 UpstreamAudioPipeline 的流。
+          // 同时跳过 microphoneMuted / accompanimentActive 初值回写（这两个字段
+          // 只描述麦克风，屏幕流写回会污染 TS3 静音/伴奏状态）。
+          if (isScreenShareProducer(produceAppData, producer.kind)) {
+            await this.registerScreenShareProducer(entry, producer, produceAppData);
+            sendJson({ type: "mediaProduced", requestId: command.requestId, producerId: producer.id });
+            return;
+          }
+          // 浏览器在 appData 里携带初始 muted / accompanimentActive（替代旧 offer
+          // 内字段），作为网关侧状态初值；后续由 setMicrophoneMuted /
+          // setAccompanimentActive 命令热更新。
+          if (produceAppData) {
+            if (typeof produceAppData.muted === "boolean") entry.microphoneMuted = produceAppData.muted;
+            if (typeof produceAppData.accompanimentActive === "boolean") entry.accompanimentActive = produceAppData.accompanimentActive;
+          }
           // S4：在 Router 上建立 DirectTransport Consumer 订阅该上行 Producer 并 resume，
           // 抽出的 Opus payload 按零退化矩阵透传 TSClient。
           await this.attachUpstreamPipeline(entry, session, producer);
@@ -1548,6 +1498,12 @@ export class VoiceBridge {
             rtpCapabilities: command.payload.rtpCapabilities as RtpCapabilities,
           });
           session.consumers.set(consumer.id, consumer);
+          if (consumer.kind === "video") {
+            try {
+              // 视频流（屏幕共享）显式拉满分发层级，避免 mediasoup 内部 BWE 将带有时域层的流卡在 TL0 (1/4 帧率)
+              await consumer.setPreferredLayers({ spatialLayer: 0, temporalLayer: 2 });
+            } catch { /* 针对单层或不支持分层的 Consumer 静默忽略 */ }
+          }
           // 说话人 Producer 关闭（idle/淘汰/离开）时 mediasoup 会自动关掉对应的
           // Consumer 并发 producerclose，这里只需把索引清掉。
           consumer.on("producerclose", () => { session.consumers.delete(consumer.id); });
@@ -1675,12 +1631,14 @@ export class VoiceBridge {
     try { session.router.close(); } catch { /* 幂等 */ }
   }
 
-  private handleScreenShareMessage(
+  private async handleScreenShareMessage(
     entry: WebClientEntry,
     message: ScreenShareClientMessage,
     sendJson: (message: Record<string, unknown>) => void,
-  ): void {
+  ): Promise<void> {
     if (message.type === "screenShareList") {
+      // R6：列表收敛为纯广播态——不填 producer 字段、不触发任何 eager pipe。
+      // 观众从列表点击观看时走 screenShareJoin 的定向态应答（一次往返拿 pipe 后的 ID）。
       sendJson({ type: "screenShareList", streams: this.listScreenStreamsFor(entry) });
       return;
     }
@@ -1707,6 +1665,7 @@ export class VoiceBridge {
         viewerEntryIds: new Set(),
         teamSpeakPublisherEntryId: entry.id,
         nativeViewerClids: new Set(),
+        pipedByViewerEntryId: new Map(),
       };
       this.screenStreams.set(screenStreamKey(stream.targetKey, stream.streamId), stream);
       sendJson({ type: "screenShareStarted", requestId: message.requestId, stream: this.describeScreenStream(stream), owner: true });
@@ -1745,23 +1704,31 @@ export class VoiceBridge {
         return;
       }
       const alreadyJoined = stream.viewerEntryIds.has(entry.id);
+      // H8：单流 Web 观众软上限。重复 join 幂等放行，不受上限拦截。
+      if (!alreadyJoined && stream.viewerEntryIds.size >= SCREEN_SHARE_MAX_WEB_VIEWERS) {
+        sendJson({
+          type: "screenShareError",
+          requestId: message.requestId,
+          code: "SCREEN_SHARE_VIEWER_LIMIT_REACHED",
+          message: `单条屏幕共享最多支持 ${SCREEN_SHARE_MAX_WEB_VIEWERS} 位网页观众`,
+        });
+        return;
+      }
       if (!alreadyJoined) stream.viewerEntryIds.add(entry.id);
       stream.viewerCount = this.screenShareViewerCount(stream);
+      // H1/R6：定向态应答——仅此处惰性 pipe 并填充请求者专属的管道 Producer ID。
+      // 发起端未推流时字段缺省，观众进入等待态，待 screenShareProducers 推送补齐。
+      const viewerStream = await this.describeScreenStreamForViewer(stream, entry.id);
       sendJson({
         type: "screenShareJoined",
         requestId: message.requestId,
-        stream: this.describeScreenStream(stream),
+        stream: viewerStream,
         ownerPeerId: stream.ownerPeerId,
         mode: stream.source,
       });
-      if (stream.source === "browser" && !alreadyJoined) {
-        this.sendToEntry(stream.ownerEntryId, {
-          type: "screenShareViewerJoined",
-          streamId: stream.streamId,
-          viewerPeerId: entry.screenPeerId,
-          viewerNickname: entry.nickname,
-        });
-      } else if (stream.source === "teamspeak" && !alreadyJoined) {
+      // H2：Web 观众 join 对发起端完全静默——不再下发 screenShareViewerJoined。
+      // 该通知此后仅由原生 TS 观众路径（screenShareNativeViewerJoined）承载。
+      if (stream.source === "teamspeak" && !alreadyJoined) {
         void this.joinNativeScreenStream(entry, stream, sendJson, message.requestId);
       }
       if (!alreadyJoined) {
@@ -1786,6 +1753,212 @@ export class VoiceBridge {
     return [...this.screenStreams.values()]
       .filter((stream) => stream.targetKey === targetKey && stream.channelId === entry.tsClient.getChannelId())
       .map((stream) => this.describeScreenStream(stream));
+  }
+
+  /**
+   * 为单个观众惰性建立（或按轨补齐）屏幕共享的 SFU 跨 Router 分发（B1、R1、R2、R3、H7）。
+   *
+   * 语义严格按序：
+   * 1. R3 并发去重：以 `${streamId}:${viewerEntryId}` 命中 in-flight 表则直接复用同一
+   *    Promise —— 同一观众的并发 join / 推送 / 重试共享一次 pipe，杜绝 double-pipe。
+   * 2. 发起端尚未推流（`sfuVideoProducerId` 缺省）→ 返回 `null`，观众进入等待态。
+   * 3. R2 按轨道独立补齐（merge）：视频、音频各自判缺、各自 pipe，成功后合并写回缓存。
+   *    「视频先推、音频后到」时第二次调用只补 pipe 音频轨。
+   * 4. 单轨 pipe 必须显式 `keepId: false`（R1）：同 Worker 下默认 `true` 会让管道 Producer
+   *    复用源 ID 而抛错；`keepId:false` 生成的 PipeProducer ID 为新 UUID。
+   * 5. 失败：关闭本次已生成的半成品 PipeProducer、**不写入缓存**（保留下次重试能力），
+   *    向该观众定向回 `SCREEN_SHARE_PIPE_FAILED` 并返回 `null`，不影响其他观众与发起端。
+   */
+  private async ensureScreenSharePipe(
+    stream: ScreenStreamRecord,
+    viewerEntryId: string,
+  ): Promise<{ videoProducerId?: string; audioProducerId?: string } | null> {
+    const inflightKey = `${stream.streamId}:${viewerEntryId}`;
+    const inflight = this.screenSharePipeInflight.get(inflightKey);
+    if (inflight) return inflight;
+
+    const pending = (async (): Promise<{ videoProducerId?: string; audioProducerId?: string } | null> => {
+      // 步骤 2：无源可管道，观众等待 screenShareProducers 推送。
+      if (!stream.sfuVideoProducerId) return null;
+      const ownerSession = this.entries.get(stream.ownerEntryId)?.media;
+      const viewerEntry = this.entries.get(viewerEntryId);
+      if (!ownerSession || !viewerEntry) return null;
+
+      // 观众可能未开语音、尚未建 Router：复用 ensureMediaSession 惰性建连。
+      const viewerSession = await this.ensureMediaSession(viewerEntry, (message) => this.sendToEntry(viewerEntryId, message));
+      const cached = stream.pipedByViewerEntryId.get(viewerEntryId);
+      let videoProducerId = cached?.videoProducerId;
+      let audioProducerId = cached?.audioProducerId;
+      const created: Producer[] = [];
+      try {
+        // 视频轨：缺则 pipe（R2，两轨独立判缺）。
+        if (!videoProducerId) {
+          const { pipeProducer } = await ownerSession.router.pipeToRouter({
+            producerId: stream.sfuVideoProducerId,
+            router: viewerSession.router,
+            keepId: false, // R1：同 Worker 下默认 true 必与源 ID 冲突抛错
+          });
+          if (!pipeProducer) throw new Error("pipeToRouter 未返回视频 PipeProducer");
+          created.push(pipeProducer);
+          videoProducerId = pipeProducer.id;
+        }
+        // 音频轨：源存在且该轨尚未缓存时才补 pipe（「视频先推、音频后到」只补音频）。
+        if (!audioProducerId && stream.sfuAudioProducerId) {
+          const { pipeProducer } = await ownerSession.router.pipeToRouter({
+            producerId: stream.sfuAudioProducerId,
+            router: viewerSession.router,
+            keepId: false, // R1
+          });
+          if (!pipeProducer) throw new Error("pipeToRouter 未返回音频 PipeProducer");
+          created.push(pipeProducer);
+          audioProducerId = pipeProducer.id;
+        }
+      } catch (error: unknown) {
+        // 半成品关闭 + 不写缓存：下次调用可整体重试。
+        for (const pipeProducer of created) {
+          try { pipeProducer.close(); } catch { /* 幂等 */ }
+        }
+        this.logger.warn({
+          streamId: stream.streamId,
+          viewerEntryId,
+          err: error instanceof Error ? error.message : String(error),
+        }, "屏幕共享 pipeToRouter 分发失败");
+        this.sendToEntry(viewerEntryId, {
+          type: "screenShareError",
+          code: "SCREEN_SHARE_PIPE_FAILED",
+          message: "屏幕共享管道建立失败，请稍后重试",
+        });
+        return null;
+      }
+      // 合并写回缓存（R2）：保留两轨各自已就绪的独立结果。
+      const merged: { videoProducerId?: string; audioProducerId?: string } = {
+        ...(videoProducerId ? { videoProducerId } : {}),
+        ...(audioProducerId ? { audioProducerId } : {}),
+      };
+      stream.pipedByViewerEntryId.set(viewerEntryId, merged);
+      return merged;
+    })();
+
+    this.screenSharePipeInflight.set(inflightKey, pending);
+    try {
+      return await pending;
+    } finally {
+      if (this.screenSharePipeInflight.get(inflightKey) === pending) this.screenSharePipeInflight.delete(inflightKey);
+    }
+  }
+
+  /**
+   * 登记屏幕共享源 Producer，并为已加入观众惰性分发（S2-03 / B3、H1、R2）。
+   *
+   * 调用前提：`mediaProduce` 已判定该 Producer 为屏幕流（见 `isScreenShareProducer`），
+   * 因此本方法**绝不**进入 TS3 语音上行管线。流程：
+   * 1. 依 `appData.streamId` 定位发起端的 `ScreenStreamRecord`（按 targetKey 精确命中）；
+   * 2. 所有权校验：`stream.ownerEntryId !== entry.id` → 定向回 `SCREEN_SHARE_NOT_OWNER`
+   *    并 `producer.close()`，绝不登记；
+   * 3. 按轨持久化 `sfuVideoProducerId` / `sfuAudioProducerId`；
+   * 4. 对当前已加入的全体观众 `ensureScreenSharePipe`（走 T3 的按轨 merge 语义：
+   *    「视频先推、音频后到」时后一次调用只补音频轨），成功后定向推送
+   *    `screenShareProducers`（携带该观众自己的管道 Producer ID，禁止广播）。
+   */
+  private async registerScreenShareProducer(
+    entry: WebClientEntry,
+    producer: Producer,
+    appData: Record<string, unknown> | undefined,
+  ): Promise<void> {
+    const streamId = typeof appData?.streamId === "string" ? appData.streamId : undefined;
+    const stream = streamId
+      ? this.screenStreams.get(screenStreamKey(teamSpeakTargetKey(entry.target), streamId))
+      : undefined;
+    if (!stream) {
+      // 无匹配的共享会话：该 Producer 无处安放，关闭以免悬挂（发起端应在
+      // screenShareStarted 之后才 produce，走到这里说明时序异常）。
+      this.logger.warn({ entryId: entry.id, producerId: producer.id, streamId }, "屏幕流 Producer 未匹配到共享会话，已关闭");
+      try { producer.close(); } catch { /* 幂等 */ }
+      return;
+    }
+    if (stream.ownerEntryId !== entry.id) {
+      this.sendToEntry(entry.id, {
+        type: "screenShareError",
+        code: "SCREEN_SHARE_NOT_OWNER",
+        message: "只有共享者可以发布屏幕流",
+      });
+      try { producer.close(); } catch { /* 幂等 */ }
+      return;
+    }
+    // 按轨持久化：video 轨（含 mediaType === "screen-video"）与音频轨分别记录。
+    const isVideoTrack = producer.kind === "video" || appData?.mediaType === "screen-video";
+    if (isVideoTrack) stream.sfuVideoProducerId = producer.id;
+    else stream.sfuAudioProducerId = producer.id;
+
+    // H4/R4：源 Producer 关闭（track.stop / transport 关闭）时级联清理并定向通知观众。
+    const dispose = (): void => this.handleScreenShareSourceProducerClosed(stream, producer.id, isVideoTrack);
+    producer.on("transportclose", dispose);
+    producer.on("@close", dispose);
+
+    // 已加入观众逐个惰性 pipe 并定向下发其专属管道 Producer ID（H1）。
+    // 迭代快照，避免 ensureScreenSharePipe 期间的集合变动影响遍历。
+    for (const viewerEntryId of [...stream.viewerEntryIds]) {
+      const piped = await this.ensureScreenSharePipe(stream, viewerEntryId);
+      if (!piped) continue;
+      this.sendToEntry(viewerEntryId, {
+        type: "screenShareProducers",
+        streamId: stream.streamId,
+        ...(piped.videoProducerId ? { videoProducerId: piped.videoProducerId } : {}),
+        ...(piped.audioProducerId ? { audioProducerId: piped.audioProducerId } : {}),
+      });
+    }
+  }
+
+  /**
+   * 源屏幕 Producer 关闭的级联清理（H4、R4、§5.8）。
+   *
+   * 发起端 `track.stop()` / transport 关闭会让 mediasoup 自动级联关闭各观众 Router
+   * 上的 PipeProducer 与 Consumer；这里负责服务端状态与信令侧的收尾：
+   * 1. 清空 `sfuVideoProducerId` / `sfuAudioProducerId` 与所有 `pipedByViewerEntryId`
+   *    对应轨字段（下一次 pipe 可重新建立）；
+   * 2. 视频轨关闭：向每位观众**定向** `screenShareVideoClosed` 驱动前端清理视频轨；
+   *    音频轨关闭且视频仍在：定向推送更新后的 `screenShareProducers`（仅视频轨 ID）。
+   *
+   * 一律 `sendToEntry` 定向发送，绝不广播（Producer ID 按观众解析，广播即串号）。
+   * 重复事件（`@close` 与 `transportclose`）由 ID 匹配短路，保证幂等。
+   */
+  private handleScreenShareSourceProducerClosed(stream: ScreenStreamRecord, producerId: string, isVideoTrack: boolean): void {
+    if (isVideoTrack) {
+      if (stream.sfuVideoProducerId !== producerId) return;
+      stream.sfuVideoProducerId = undefined;
+      for (const piped of stream.pipedByViewerEntryId.values()) piped.videoProducerId = undefined;
+      for (const viewerEntryId of [...stream.viewerEntryIds]) {
+        this.sendToEntry(viewerEntryId, { type: "screenShareVideoClosed", streamId: stream.streamId });
+      }
+      return;
+    }
+    if (stream.sfuAudioProducerId !== producerId) return;
+    stream.sfuAudioProducerId = undefined;
+    for (const piped of stream.pipedByViewerEntryId.values()) piped.audioProducerId = undefined;
+    for (const viewerEntryId of [...stream.viewerEntryIds]) {
+      const piped = stream.pipedByViewerEntryId.get(viewerEntryId);
+      this.sendToEntry(viewerEntryId, {
+        type: "screenShareProducers",
+        streamId: stream.streamId,
+        ...(piped?.videoProducerId ? { videoProducerId: piped.videoProducerId } : {}),
+      });
+    }
+  }
+
+  /**
+   * 清理屏幕共享的 in-flight pipe 记录（R3/H6）。传入 `viewerEntryId` 时只清理该观众
+   * 的条目（观众离开）；缺省则清理该 stream 的全部条目（整条流停止）。
+   * 已在进行中的 Promise 不会被取消——其 `finally` 依据身份判定自行摘除，不会误删新条目。
+   */
+  private clearScreenSharePipeInflight(streamId: string, viewerEntryId?: string): void {
+    if (viewerEntryId) {
+      this.screenSharePipeInflight.delete(`${streamId}:${viewerEntryId}`);
+      return;
+    }
+    const prefix = `${streamId}:`;
+    for (const key of [...this.screenSharePipeInflight.keys()]) {
+      if (key.startsWith(prefix)) this.screenSharePipeInflight.delete(key);
+    }
   }
 
   /**
@@ -1826,6 +1999,30 @@ export class VoiceBridge {
       createdAt: stream.createdAt,
       viewerCount: stream.viewerCount,
       viewers: this.describeScreenViewers(stream),
+    };
+  }
+
+  /**
+   * 定向态描述（H1）：在广播态描述基础上，为**当前请求者**惰性建立 SFU 管道并填充
+   * 其专属的管道 Producer ID（`pipeToRouter keepId:false` 生成的新 UUID）。
+   *
+   * 仅用于 `screenShareJoin` 的 `screenShareJoined` 应答——「实际观看」是唯一触发
+   * 惰性 pipe 的入口（R6：`screenShareList` 走广播态，绝不 eager pipe）。
+   * `ensureScreenSharePipe` 返回 `null`（发起端未推流 / 非 browser 来源 / pipe 失败）
+   * 时 producer 字段缺省，观众进入等待态。
+   */
+  private async describeScreenStreamForViewer(
+    stream: ScreenStreamRecord,
+    viewerEntryId: string,
+  ): Promise<ScreenShareStreamDescription> {
+    const base = this.describeScreenStream(stream);
+    if (stream.source !== "browser") return base;
+    const piped = await this.ensureScreenSharePipe(stream, viewerEntryId);
+    if (!piped) return base;
+    return {
+      ...base,
+      ...(piped.videoProducerId ? { videoProducerId: piped.videoProducerId } : {}),
+      ...(piped.audioProducerId ? { audioProducerId: piped.audioProducerId } : {}),
     };
   }
 
@@ -1880,6 +2077,24 @@ export class VoiceBridge {
   }
 
   private stopScreenStream(stream: ScreenStreamRecord, reason: string): void {
+    // H4/R4：先捕获源 Producer 句柄，清空本地句柄与缓存，再主动 close() 触发
+    // mediasoup 对各观众 PipeProducer/Consumer 的级联关闭。顺序刻意如此：句柄清空后
+    // 源 Producer 的 close 监听器短路，避免在整条流停止时向观众重复下发逐轨通知
+    // （随后广播的 screenShareStopped 已足够驱动前端整体清理）。
+    const ownerSession = this.entries.get(stream.ownerEntryId)?.media;
+    const sourceProducers: Producer[] = [];
+    if (ownerSession) {
+      for (const id of [stream.sfuVideoProducerId, stream.sfuAudioProducerId]) {
+        if (!id) continue;
+        const producer = ownerSession.producers.get(id);
+        if (producer) sourceProducers.push(producer);
+      }
+    }
+    stream.sfuVideoProducerId = undefined;
+    stream.sfuAudioProducerId = undefined;
+    stream.pipedByViewerEntryId.clear();
+    this.clearScreenSharePipeInflight(stream.streamId);
+
     if (stream.source === "browser" && stream.teamSpeakStreamId && stream.teamSpeakPublisherEntryId) {
       const publisher = this.entries.get(stream.teamSpeakPublisherEntryId);
       if (publisher) {
@@ -1890,6 +2105,9 @@ export class VoiceBridge {
       }
     }
     if (!this.screenStreams.delete(screenStreamKey(stream.targetKey, stream.streamId))) return;
+    for (const producer of sourceProducers) {
+      try { producer.close(); } catch { /* 幂等 */ }
+    }
     const message = { type: "screenShareStopped", streamId: stream.streamId, reason };
     this.broadcastScreenMessage(stream, message);
     stream.viewerEntryIds.clear();
@@ -1900,6 +2118,10 @@ export class VoiceBridge {
   private leaveScreenStream(entry: WebClientEntry, stream: ScreenStreamRecord): void {
     if (!stream.viewerEntryIds.delete(entry.id)) return;
     stream.viewerCount = this.screenShareViewerCount(stream);
+    // H6：观众离开时清理其管道缓存与 in-flight 条目；其 Router 随 closeMediaSession
+    // 关闭后，该观众 Router 上的 PipeProducer 自动消亡。
+    stream.pipedByViewerEntryId.delete(entry.id);
+    this.clearScreenSharePipeInflight(stream.streamId, entry.id);
     if (stream.source === "browser") this.sendToEntry(stream.ownerEntryId, { type: "screenShareViewerLeft", streamId: stream.streamId, viewerPeerId: entry.screenPeerId });
     else {
       void entry.tsClient.sendProtocolCommand(buildTeamSpeakCommand("removeclientfromstream", {
@@ -1995,26 +2217,14 @@ export class VoiceBridge {
       return;
     }
 
-    const owner = this.entries.get(stream.ownerEntryId);
-    const isOwner = entry.id === stream.ownerEntryId;
-    const isViewer = stream.viewerEntryIds.has(entry.id);
-    if (!owner || (!isOwner && !isViewer)) {
-      sendJson({ type: "screenShareError", code: "SCREEN_SHARE_SIGNAL_FORBIDDEN", message: "无权发送该屏幕共享信令" });
-      return;
-    }
-    // Keep the browser P2P graph bipartite: the owner may signal only an
-    // active viewer, and a viewer may signal only the owner. Without this
-    // check one viewer could inject SDP/ICE into another viewer's peer.
-    const targetEntry = isOwner
-      ? [...stream.viewerEntryIds]
-        .map((id) => this.entries.get(id))
-        .find((candidate) => candidate?.screenPeerId === targetPeerId)
-      : targetPeerId === owner.screenPeerId ? owner : undefined;
-    if (!targetEntry || targetEntry.id === entry.id) {
-      sendJson({ type: "screenShareError", code: "SCREEN_SHARE_PEER_NOT_FOUND", message: "观看者已离开" });
-      return;
-    }
-    this.sendToEntry(targetEntry.id, { type: "screenShareSignal", streamId: stream.streamId, fromPeerId: entry.screenPeerId, signal });
+    // H2：browser 来源流的 Web 观众 P2P 信令已下线——网页观众经 SFU 管道消费，
+    // 不再与发起端建 RTCPeerConnection。走到这里即非原生 TS 观众路径
+    // （teamspeak 来源与 owner <-> ts-viewer-* 已在上方分别处理），一律拒绝。
+    sendJson({
+      type: "screenShareError",
+      code: "SCREEN_SHARE_SIGNAL_FORBIDDEN",
+      message: "该屏幕共享已通过 SFU 分发，网页观众无需建立 P2P 连接",
+    });
   }
 
   private async publishBrowserScreenStream(entry: WebClientEntry, stream: ScreenStreamRecord): Promise<void> {
@@ -2172,6 +2382,7 @@ export class VoiceBridge {
         viewerEntryIds: new Set(),
         nativeViewerClids: new Set(),
         sourceClientId,
+        pipedByViewerEntryId: new Map(),
       };
       stream.sourceClientId = sourceClientId;
       stream.ownerNickname = params.name || stream.ownerNickname;
@@ -2533,18 +2744,6 @@ function sendProtocolError(sendJson: (message: Record<string, unknown>) => void,
   sendJson({ type: "error", error: { code, message, recoverable: false } });
 }
 
-/**
- * 旧客户端回退到兼容通道时发送的遗留信令（S6 起服务端无对应会话，静默忽略）。
- */
-function isLegacyWebRtcStopMessage(raw: string): boolean {
-  try {
-    const value: unknown = JSON.parse(raw);
-    return isRecord(value) && value.type === "webrtcStop";
-  } catch {
-    return false;
-  }
-}
-
 function parseNumber(value: string | undefined): number | undefined {
   if (!value || !/^\d+$/.test(value)) return undefined;
   const parsed = Number(value);
@@ -2629,30 +2828,14 @@ function isChannelRecord(value: unknown): value is { id: string; name: string } 
 
 function createAudioFlowStats(): AudioFlowStats {
   return {
-    ingressFrames: 0,
-    ingressDroppedFrames: 0,
-    ingressFirstAt: null,
-    ingressLastAt: null,
-    ingressMaxGapMs: 0,
-    tsSendFrames: 0,
-    tsSendErrors: 0,
-    tsSendFirstAt: null,
-    tsSendLastAt: null,
-    tsSendMaxGapMs: 0,
-    tsEncodeMaxMs: 0,
     tsReceiveFrames: 0,
     tsReceiveFirstAt: null,
     tsReceiveLastAt: null,
     tsReceiveMaxGapMs: 0,
     egressFrames: 0,
-    egressDroppedFrames: 0,
     egressFirstAt: null,
     egressLastAt: null,
     egressMaxGapMs: 0,
-    egressSentFirstAt: null,
-    egressSentLastAt: null,
-    egressSentMaxGapMs: 0,
-    egressPeakBufferedBytes: 0,
     egressFramesByClient: {},
   };
 }

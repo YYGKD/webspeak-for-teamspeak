@@ -18,7 +18,7 @@ Die öffentliche Demo läuft in Hongkong. Netzwerkbedingungen und Auslastung kö
 | Plattformübergreifendes P2P-Bildschirmteilen | Browsernutzer und native TeamSpeak-6-Clients können die Bildschirmfreigabe gegenseitig starten und ansehen; WebRTC/ICE überträgt Medien direkt, WebSpeak leitet nur die Signalisierung weiter. |
 | IPv6-Ziele | IPv6-TeamSpeak-Ziele und über DNS aufgelöste IPv6-Adressen werden standardmäßig unterstützt. |
 | Kanäle und Mitglieder | Kanalstruktur und aktuelle Mitglieder anzeigen und Kanäle wechseln. |
-| Echtzeit-Sprache | Opus-Audio mit kompatiblem Transport und optional integriertem WebRTC für geringere Latenz. |
+| Echtzeit-Sprache | Opus-Audio wird durchgängig über das integrierte WebRTC (mediasoup, einzige Engine) mit geringer Latenz übertragen; WebSocket übernimmt nur JSON-Business und Mediensteuerungs-Signalisierung. |
 | Audiosteuerung | Mikrofon und Lautsprecher auswählen, Lautstärke regeln, testen, stummschalten, VOX und individuelle Mitgliedslautstärke. |
 | Browserseitige Geräuschunterdrückung | Optionale Mikrofon-Geräuschunterdrückung in der Browseraufnahme, ohne zusätzliche serverseitige Audioverarbeitung. |
 | Nachrichten und Aktionen | Kanal- und Serverchat, private Nachrichten, Anstupsen und Flüsterziele. |
@@ -50,7 +50,7 @@ Die Screenshots zeigen die deutsche Willkommensseite, den Sprachbereich, die Aud
 
 ## 🧩 Erweiterte Funktionen
 
-Diese Funktionen sind optional. Ohne sie arbeitet WebSpeak weiterhin mit dem kompatiblen Sprachtransport. Die Einstellungen befinden sich unter **Administration → Server** und gelten für neue Verbindungen.
+Diese Funktionen sind optional. Echtzeit-Sprache läuft stets über das integrierte WebRTC (mediasoup); WebSocket übernimmt nur JSON-Business und Mediensteuerungs-Signalisierung, und der alte binäre WebSocket-Audio-Kompatibilitätstransport ist vollständig entfernt. Die Einstellungen befinden sich unter **Administration → Server** und gelten für neue Verbindungen.
 
 ### 1. WebRTC-Sprache mit niedriger Latenz
 
@@ -59,7 +59,7 @@ WebRTC verwendet für Browser-Sprache einen Echtzeit-Medienpfad und ermöglicht 
 1. Unter `/admin` anmelden und auf der Seite **Server** die **Erweiterten Einstellungen** öffnen.
 2. Bei deaktiviertem WebRTC Start- und Endport für UDP festlegen. Der Standardbereich ist `40000–40099`.
 3. Den gesamten Bereich `40000–40099` für **UDP und TCP** in Sicherheitsgruppe und Firewall des WebSpeak-Hosts freigeben (TCP dient als ICE-over-TCP-Fallback).
-4. **WebRTC** aktivieren und speichern. Nicht unterstützte Browser oder Netzwerke wechseln automatisch zum kompatiblen Transport.
+4. **WebRTC** aktivieren und speichern. Kann ein Netzwerk kein WebRTC aufbauen (z. B. UDP/TCP von einer Firewall blockiert), zeigt die Oberfläche eine klare Netzwerkdiagnose und einen Wiederholungshinweis, statt auf einen WebSocket-Audiokanal zurückzufallen.
 
 Der Portbereich ist bei aktiviertem WebRTC gesperrt. Zum Ändern WebRTC zuerst deaktivieren und speichern, danach die Firewall-Regeln anpassen. Für öffentliche Bereitstellungen ist HTTPS erforderlich.
 

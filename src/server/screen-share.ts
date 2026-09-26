@@ -96,6 +96,13 @@ export interface ScreenShareStreamDescription {
   createdAt: number;
   viewerCount: number;
   viewers: ScreenShareViewerDescription[];
+  /**
+   * 对**当前请求者**可见的 SFU Producer ID（pipeToRouter keepId:false 之后、位于请求者
+   * Router 上的 PipeProducer，新 UUID）。仅 browser 来源、已推流、且已为该请求者惰性
+   * pipe 时存在；广播消息与 screenShareList 应答中一律缺省。
+   */
+  videoProducerId?: string;
+  audioProducerId?: string;
 }
 
 export type ScreenShareClientMessage =
@@ -133,6 +140,52 @@ export type ScreenShareClientMessage =
 export type ScreenShareMessageParseResult =
   | ScreenShareClientMessage
   | { error: { code: string; message: string } };
+
+/**
+ * `screenShareError` 错误码体系（服务端 → 客户端）。
+ *
+ * 新增错误码必须在此登记，前端依据 `code` 做分支处理。
+ */
+export type ScreenShareErrorCode =
+  | "SCREEN_SHARE_ALREADY_ACTIVE"
+  | "SCREEN_SHARE_NOT_FOUND"
+  | "SCREEN_SHARE_TARGET_MISMATCH"
+  | "SCREEN_SHARE_NOT_OWNER"
+  | "SCREEN_SHARE_OWNER_CANNOT_JOIN"
+  | "SCREEN_SHARE_SIGNAL_FORBIDDEN"
+  | "SCREEN_SHARE_SOURCE_UNAVAILABLE"
+  | "SCREEN_SHARE_INVALID_SIGNAL"
+  | "SCREEN_SHARE_SIGNAL_FAILED"
+  | "SCREEN_SHARE_PEER_NOT_FOUND"
+  | "SCREEN_SHARE_JOIN_FAILED"
+  /** SFU 管道建立失败（pipeToRouter 抛错，半成品已关闭且未写入缓存）。 */
+  | "SCREEN_SHARE_PIPE_FAILED"
+  /** 单流 Web 观众数达到 SCREEN_SHARE_MAX_WEB_VIEWERS 上限。 */
+  | "SCREEN_SHARE_VIEWER_LIMIT_REACHED";
+
+/**
+ * 服务端 → 客户端屏幕共享信令。
+ *
+ * `screenShareProducers` 与 `screenShareVideoClosed` 携带按观众解析的管道 Producer ID，
+ * 必须经 `sendToEntry` 定向发送，禁止广播（广播即串号）。
+ */
+export type ScreenShareServerMessage =
+  | {
+      type: "screenShareProducers";
+      streamId: string;
+      videoProducerId?: string;
+      audioProducerId?: string;
+    }
+  | {
+      type: "screenShareVideoClosed";
+      streamId: string;
+    }
+  | {
+      type: "screenShareError";
+      requestId?: string;
+      code: ScreenShareErrorCode;
+      message: string;
+    };
 
 const MAX_STREAM_ID_LENGTH = 128;
 const MAX_PEER_ID_LENGTH = 128;

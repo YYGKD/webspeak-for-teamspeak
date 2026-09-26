@@ -4,29 +4,28 @@ Server-side bridge that lets users join TeamSpeak voice channels from a browser.
 
 ## Architecture
 
-```
-Browser (PCM capture) → WebSocket → Node.js server (PCM→Opus) → TeamSpeak server
-Browser (playback)    ← WebSocket ← Node.js server (Opus relay) ← TeamSpeak server
+```text
+Browser ── WebRTC (mediasoup-client, Opus) ──► WebSpeak gateway ──► TeamSpeak 3 / 6
+Browser ── WebSocket (JSON business + media control signaling only) ──► WebSpeak gateway
 ```
 
-- Realtime audio (WebRTC) uses a single in-process **mediasoup** engine; the legacy werift engine and the pre-allocated SFU slot model were retired in S6.
+- Realtime audio runs **entirely over WebRTC** on a single in-process **mediasoup** engine. The legacy werift engine, the pre-allocated SFU slot model, and the WebSocket binary audio compatibility channel are all retired.
   - Downlink: TS3 `voiceData` → `speaker-producer-map` DirectTransport `Producer` → browser `mediasoup-client` consumer.
   - Uplink: browser `Producer` → server DirectTransport `Consumer` → `tsClient.sendVoice` / `sendWhisper`.
   - `WEBSPEAK_SFU_SLOTS` no longer exists; speaker count is bounded by `WEBSPEAK_MAX_SPEAKERS` (1–64, default 32).
-  - The WS binary path above remains as the compatibility fallback when WebRTC is unavailable.
+  - There is **no WS audio fallback**: when WebRTC negotiation exhausts its retries the client reports `WEBRTC_UNAVAILABLE` with network guidance instead of degrading to a WS channel.
+- WebSocket carries **JSON business and media-control signaling only** (channels/members, chat, screen-share negotiation, mediasoup/WebRTC handshake). Inbound binary frames are rejected with the `UNSUPPORTED_BINARY_FRAME` protocol error.
 - Each browser user = one independent TS3 virtual client via `@echosixhiya/teamspeak-client`
-- Frontend captures PCM in an `AudioWorklet` when available (with a `ScriptProcessorNode` fallback), assembles fixed 960-sample frames, and sends Int16 binary over WebSocket
-- Server encodes PCM → Opus using `@discordjs/opus` (CJS, loaded via `createRequire`)
+- The browser still captures mic audio for local level/VOX metering, but no longer sends PCM over the socket
+- Server-side Opus transcoding is gone; `@discordjs/opus` is a `devDependency` used only by the headless test suite (`scripts/lib/opus-codec.mjs`)
 - Server sends Opus to TS via `client.sendVoice(data, codec=4)`
-- Incoming TS voice → Opus frames → binary WebSocket → browser `AudioDecoder` → playback
 - Channel/member list fetched via TS6 WebQuery HTTP API (port 10080, requires API key)
-- WebSocket text frames = JSON commands, binary frames = PCM audio / Opus relay
 
 ## Project Structure
 
 ```
 web/                         # Vue 3 + Vite frontend (SPA)
-  src/composables/useVoiceWebSocket.ts  # Mic capture, VOX/PTT, playback, WS client
+  src/composables/useVoiceWebSocket.ts  # WS JSON client, mic level/VOX, WebRTC + playback
   src/views/WebClient.vue               # Connect form + channel/member tree
 src/
   index.ts                    # Entry point, config loading, server startup
@@ -34,33 +33,27 @@ src/
   logger.ts                   # Pino wrapper
   server/
     server.ts                 # Express + HTTPS + WS setup
-    voice-bridge.ts           # /ws/voice endpoint, PCM→Opus encoding, WebQuery API
+    voice-bridge.ts           # /ws/voice endpoint, JSON protocol, media signaling, WebQuery API
     ts-client.ts              # TS3Client wrapper around @echosixhiya/teamspeak-client
 ```
 
 ## Key Technical Details
 
-### Audio Pipeline
-1. Browser mic → `getUserMedia` (48kHz mono) → `AudioWorklet` frame assembler (960 samples); older browsers use `ScriptProcessorNode` (1024-sample chunks) before the same assembler
-2. Float32 → Int16 conversion → PTT/VOX gate → WebSocket binary send
-3. Server encodes each 1920-byte (960-sample, 20ms) PCM frame → `OpusEncoder.encode()` → `tsClient.sendVoice(opus, 4)`
-4. Incoming: TS → `voiceData` event → 3-byte header `[codec][clientId BE]` → WS binary → browser `AudioDecoder` → playback
-5. Browser uplink is capped at 10 PCM frames (about 200ms); gateway egress applies a bounded WebSocket byte guard; browser playback resets stale decoder/source queues above 120ms.
+### Audio Pipeline (pure WebRTC / mediasoup)
+1. Browser mic → `getUserMedia` (48kHz mono) → WebRTC `Producer` (Opus) published on the server `send` transport; mic level/VOX metering stays local.
+2. Server DirectTransport `Consumer` → `tsClient.sendVoice(opus, 4)` / `sendWhisper`.
+3. Downlink: TS3 `voiceData` → per-speaker DirectTransport `Producer` → browser `mediasoup-client` `Consumer` → per-speaker WebAudio playback graph.
+4. No PCM frames, no server-side Opus encoding, and no binary WebSocket frames on the audio path. Exhausting the WebRTC retries (2s/5s) ends in `WEBRTC_UNAVAILABLE`, never a fallback channel.
 
 Audio flow counters are kept in memory and exposed in admin session summaries. Do not add per-frame persistent logging to the voice path.
 
-### CJS Interop
-`@discordjs/opus` is CommonJS, loaded via:
-```ts
-import { createRequire } from "node:module";
-const require = createRequire(import.meta.url);
-const { OpusEncoder } = require("@discordjs/opus");
-```
+### Test-only Opus
+Server-side Opus transcoding was retired, so `@discordjs/opus` is no longer imported by production code. It is a `devDependency` loaded only by the headless test suite through `scripts/lib/opus-codec.mjs`.
 
 ### WebSocket Message Routing
-- Text frames → JSON commands (`listChannels`, `switchChannel`)
-- Binary frames → PCM audio (browser→server) or Opus frames (server→browser)
-- JSON detection: `typeof data === "string"` first, then fallback `data[0] === 0x7b` with try/catch
+- Text frames → JSON only: business commands (`listChannels`, `switchChannel`, chat, …), screen-share signaling, and mediasoup/WebRTC media signaling
+- Binary frames → rejected with the `UNSUPPORTED_BINARY_FRAME` protocol error (the WS audio channel is retired)
+- Frames are decoded as UTF-8 strings; malformed JSON is answered with an `INVALID_JSON` protocol error
 
 ### Event Handlers
 Must be registered BEFORE `tsClient.connect()` because `clientEnter`/`clientLeave` fire during handshake.
@@ -81,12 +74,13 @@ Uses TS6 WebQuery HTTP API (`http://tsHost:tsQueryPort/1/channellist`) with `x-a
 ```bash
 npm ci --ignore-scripts
 npm run prepare:sdk
-npm rebuild @discordjs/opus --foreground-scripts
 npm --prefix web ci
 # Acceptance baseline (must be zero errors):
 npm run build && npm --prefix web run build
 node dist/index.js
 ```
+
+`@discordjs/opus` is a `devDependency`: rebuild it (`npm rebuild @discordjs/opus --foreground-scripts`) only when running the headless test suite, never to build or run the gateway.
 
 Media worker binaries are vendored under `vendor/mediasoup-worker/` and verified by `node scripts/verify-worker.mjs` (sha256 vs `SHA256SUMS`). Docker and CI run that check; never let mediasoup fall back to downloading a worker at runtime.
 
@@ -96,7 +90,7 @@ Media worker binaries are vendored under `vendor/mediasoup-worker/` and verified
 - No secrets in source; config.json is gitignored
 
 ## Known Limitations
-- Browser must be Chrome/Edge 94+ (WebCodecs AudioDecoder)
+- Browser must support WebRTC and `AudioWorklet` (current Chrome/Edge/Firefox/Safari)
 - HTTPS required (self-signed cert OK, generated in `certs/`)
 - Max 32 concurrent users (TS3 license limit)
 - `tsApiKey` required for channel list; voice works without it

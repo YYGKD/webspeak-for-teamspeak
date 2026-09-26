@@ -74,16 +74,58 @@ try {
 
   // ───────────────────────── ② Router channels:2 ─────────────────────────
   console.log("\n=== ② Router 以 channels: 2 创建 ===");
-  const declared = MEDIA_CODECS[0];
+  const audioCodecs = MEDIA_CODECS.filter((codec) => codec.kind === "audio");
+  const videoCodecs = MEDIA_CODECS.filter((codec) => codec.kind === "video");
+  const declared = audioCodecs[0];
   check(
-    "MEDIA_CODECS 声明 audio/opus 48000/2 PT=111",
-    MEDIA_CODECS.length === 1 &&
-      declared.kind === "audio" &&
+    "MEDIA_CODECS 存在且仅存在 1 条 audio/opus 48000/2 PT=111",
+    audioCodecs.length === 1 &&
+      declared?.kind === "audio" &&
       declared.mimeType === "audio/opus" &&
       declared.clockRate === 48000 &&
       declared.channels === 2 &&
       declared.preferredPayloadType === 111,
-    JSON.stringify(declared),
+    JSON.stringify(audioCodecs),
+  );
+  // F1：直接复用第 78 行已声明的 `videoCodecs`，严禁再次 `const videoCodecs = ...`。
+  const declaredVideo = videoCodecs[0];
+  const fallbackVideo = videoCodecs[1];
+  const h264Feedback = [
+    { type: "nack" },
+    { type: "nack", parameter: "pli" },
+    { type: "ccm", parameter: "fir" },
+    { type: "goog-remb" },
+    { type: "transport-cc" },
+  ];
+  check(
+    "MEDIA_CODECS 恰存在 2 条 video codec，且 H.264 优先 / VP8 兜底",
+    videoCodecs.length === 2 &&
+      declaredVideo?.kind === "video" &&
+      declaredVideo.mimeType === "video/H264" &&
+      fallbackVideo?.kind === "video" &&
+      fallbackVideo.mimeType === "video/VP8",
+    JSON.stringify(videoCodecs.map((codec) => codec.mimeType)),
+  );
+  check(
+    "首条 video/H264 逐字段锁定 90000 与 packetization-mode/profile-level-id/level-asymmetry-allowed",
+    declaredVideo?.clockRate === 90000 &&
+      declaredVideo.parameters?.["packetization-mode"] === 1 &&
+      declaredVideo.parameters?.["profile-level-id"] === "42e01f" &&
+      declaredVideo.parameters?.["level-asymmetry-allowed"] === 1,
+    JSON.stringify(declaredVideo?.parameters),
+  );
+  check(
+    "首条 video/H264 声明 5 项 RTCP 反馈（nack / nack-pli / ccm-fir / goog-remb / transport-cc）",
+    Array.isArray(declaredVideo?.rtcpFeedback) &&
+      declaredVideo.rtcpFeedback.length === 5 &&
+      JSON.stringify(declaredVideo.rtcpFeedback) === JSON.stringify(h264Feedback),
+    JSON.stringify(declaredVideo?.rtcpFeedback),
+  );
+  check(
+    "次条 video/VP8 兜底声明完整：90000 且 RTCP 反馈结构与 H.264 一致",
+    fallbackVideo?.clockRate === 90000 &&
+      JSON.stringify(fallbackVideo.rtcpFeedback) === JSON.stringify(h264Feedback),
+    JSON.stringify({ clockRate: fallbackVideo?.clockRate, rtcpFeedback: fallbackVideo?.rtcpFeedback }),
   );
 
   router = await createMediaRouter(worker);

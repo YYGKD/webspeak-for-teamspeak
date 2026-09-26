@@ -41,6 +41,8 @@ export interface MediaProduceOptions {
   track: MediaStreamTrack;
   appData?: types.AppData;
   codecOptions?: types.ProducerCodecOptions;
+  /** 透传给 `transport.produce()`，用于表达码率/帧率天花板（屏幕共享 H5）。 */
+  encodings?: types.RtpEncodingParameters[];
 }
 
 /**
@@ -92,6 +94,8 @@ export class MediaClient {
   private recvTransport: types.Transport | null = null;
   private readonly producers = new Map<string, types.Producer>();
   private readonly consumers = new Map<string, types.Consumer>();
+  /** `ensureRecvReady()` 的 in-flight Promise：并发调用共享，避免重复建链。 */
+  private recvReadyPromise: Promise<void> | null = null;
 
   constructor(
     private readonly signaling: MediaSignaling,
@@ -173,6 +177,30 @@ export class MediaClient {
     return transport;
   }
 
+  /**
+   * 确保 recv 方向媒体会话就绪（`device` 已加载 + 下行 `recvTransport` 已建立）。
+   *
+   * 幂等且并发安全：就绪后立即 resolve；并发调用共享同一个 in-flight Promise，
+   * 不会重复 `Device.load()` / `createTransport("recv")`。失败时清空缓存，
+   * 允许调用方重试。`consume()` 的契约是「调用前必须 `await ensureRecvReady()`」。
+   */
+  async ensureRecvReady(): Promise<void> {
+    if (this.loaded && this.recvTransport) return;
+    if (!this.recvReadyPromise) {
+      this.recvReadyPromise = this.prepareRecvReady().finally(() => {
+        this.recvReadyPromise = null;
+      });
+    }
+    return this.recvReadyPromise;
+  }
+
+  private async prepareRecvReady(): Promise<void> {
+    if (!this.device || !this.device.loaded) {
+      await this.loadDevice(await this.signaling.requestRtpCapabilities());
+    }
+    await this.createRecvTransport();
+  }
+
   /** 在 send transport 上发布麦克风（/ 混音）轨道。 */
   async produce(options: MediaProduceOptions): Promise<types.Producer> {
     const transport = this.sendTransport;
@@ -181,6 +209,7 @@ export class MediaClient {
       track: options.track,
       ...(options.appData ? { appData: options.appData } : {}),
       ...(options.codecOptions ? { codecOptions: options.codecOptions } : {}),
+      ...(options.encodings ? { encodings: options.encodings } : {}),
     });
     this.producers.set(producer.id, producer);
     producer.on("transportclose", () => { this.producers.delete(producer.id); });
@@ -192,7 +221,11 @@ export class MediaClient {
   async consume(producerId: string): Promise<types.Consumer> {
     const device = this.requireDevice();
     const transport = this.recvTransport;
-    if (!transport) throw new Error("下行 transport 尚未创建");
+    if (!transport) {
+      // 就绪边界契约（R7/M2）：调用前必须 `await ensureRecvReady()`。未就绪时直接
+      // 抛错，绝不静默等待，避免调用方悬挂在永不 resolve 的 consume 上。
+      throw new Error("下行媒体会话尚未就绪：请先 await ensureRecvReady() 再调用 consume()");
+    }
     const params = await this.signaling.consume(transport.id, producerId, device.rtpCapabilities);
     const consumer = await transport.consume({
       id: params.consumerId,
@@ -244,6 +277,7 @@ export class MediaClient {
     this.sendTransport = null;
     this.recvTransport = null;
     this.device = null;
+    this.recvReadyPromise = null;
   }
 
   private requireDevice(): types.Device {

@@ -18,7 +18,7 @@ The public demo is hosted in Hong Kong and its network conditions and load may b
 | Cross-platform P2P screen sharing | Browser users and native TeamSpeak 6 clients can start and watch each other's screen shares; WebRTC/ICE carries media directly while WebSpeak relays negotiation signaling only. |
 | IPv6 targets | IPv6 TeamSpeak targets and IPv6 addresses resolved from hostnames are supported by default. |
 | Channels and members | Browse the channel tree, see live member states, and switch channels. |
-| Realtime voice | Opus audio with a compatibility transport and optional bundled WebRTC low-latency transport. |
+| Realtime voice | Opus audio is carried end to end by the bundled WebRTC (single mediasoup engine) low-latency transport; WebSocket handles JSON business and media-control signaling only. |
 | Audio controls | Select microphones and speakers, adjust volume, test the microphone, mute, use VOX, and control member volume. |
 | Browser-side noise suppression | Optional microphone noise suppression runs at the browser capture stage, without adding server-side audio processing. |
 | Messaging and actions | Channel chat, server chat, private messages, poke actions, and whisper targets. |
@@ -50,7 +50,7 @@ The screenshots show the English welcome page, voice workspace, audio controls, 
 
 ## 🧩 Advanced features
 
-These features are optional. WebSpeak continues to work with the compatibility voice transport when they are disabled. Configure them under **Administration → Servers**; saved changes apply to new connections.
+These features are optional. Realtime voice always runs over the bundled WebRTC (mediasoup); WebSocket carries JSON business and media-control signaling only, and the legacy WebSocket audio compatibility transport is fully retired. Configure them under **Administration → Servers**; saved changes apply to new connections.
 
 ### 1. WebRTC low-latency voice
 
@@ -59,7 +59,7 @@ WebRTC moves browser voice to a realtime media path and also enables desktop acc
 1. Sign in at `/admin` and open **Advanced settings** on the **Servers** page.
 2. While WebRTC is disabled, choose the UDP start and end ports. The default range is `40000–40099`.
 3. Allow the complete `40000–40099` range for **both UDP and TCP** in the WebSpeak host's security group and firewall (TCP backs ICE-over-TCP).
-4. Enable **WebRTC** and save. New visitors will negotiate WebRTC; unsupported browsers and networks fall back to the compatibility transport.
+4. Enable **WebRTC** and save. New visitors will negotiate WebRTC; if a network cannot establish WebRTC (for example UDP/TCP blocked by a firewall), the UI shows a clear network diagnosis and retry guidance instead of falling back to any WebSocket audio channel.
 
 The port range is locked while WebRTC is enabled. Disable and save WebRTC before changing it, then update the firewall rules. Public deployments also need HTTPS.
 
