@@ -69,15 +69,17 @@ WebRTC 启用后端口范围会锁定。要修改端口，先关闭 WebRTC 并�
 - `WEBSPEAK_MAX_SPEAKERS`：单会话同时发布的说话人上限（1–64，默认 32）。
 - `WEBSPEAK_MEDIA_PUBLIC_HOST`：代理机房/端口映射部署时的公网媒体地址（写入 ICE candidate 的 `announcedAddress`）；媒体地址与监听地址一致时无需设置。
 
-### 屏幕共享的 ICE 候选
+### 屏幕共享（SFU 中央转发）
 
-屏幕共享媒体仍优先走浏览器之间的直连，WebSpeak 只转发协商信令。**屏幕共享复用语音 WebRTC 的同一套 ICE 配置**（自建 STUN，以及按需配置的外部 TURN），不需要为它单独设置任何东西；STUN 不承载媒体。
+网页端之间的屏幕共享由 WebSpeak 网关的 **mediasoup SFU 中央转发**：发起端只向网关推 **1 路**画面，网关再按需分发给每一位观看者。因此观众人数增加**不会**增加发起端的上行带宽，也不再需要浏览器之间建立点对点连接——双方都在对称型 NAT、企业网或手机热点后面同样能观看。
 
-配置了 TURN 时，媒体可能经过该外部 TURN 服务，但不会经过 WebSpeak 网关；未配置时只使用直连和 STUN。
+- **双轨传输**：屏幕画面与系统音频（在浏览器共享选择框中勾选共享音频时）各为一路，观看端音画同步。
+- **编码**：优先 H.264（可走显卡硬件编码，CPU 占用低），不支持时回退 VP8。
+- **分辨率与帧率**：共享前可在设置窗口选择最高 1080p 与 60 FPS；采集上限不会超过所选来源本身的尺寸（共享标签页时，上限就是该标签页的视口）。带宽紧张时的取舍按来源决定：**标签页/窗口共享保分辨率**（文档、代码优先保证清晰），**整屏共享且帧率选 ≥30 FPS 时保帧率**（视频、游戏优先保证流畅）。
+- **观看端**：页面提供直播状态、观众人数、播放器音量、全屏与退出控制；单条共享最多 **32 位**网页观众。
+- **性能面板**：同时显示「采集」尺寸与「发送给观看者」的实际编码输出尺寸、帧率、码率、丢包与限制原因，便于判断瓶颈在采集、编码还是网络。
 
-### 跨端 P2P 屏幕共享
-
-浏览器用户与 TeamSpeak 6 原生客户端可以互相发现、发起和观看屏幕共享。浏览器之间以及浏览器与原生客户端之间的屏幕媒体优先通过 WebRTC/ICE 端到端传输；WebSpeak 负责会话鉴权、共享状态和 SDP/ICE 信令转发，不承载屏幕媒体流量。页面提供直播状态、观众人数、播放器音量、全屏和退出控制，也可在共享设置窗口中选择最高 1080p 与 60 FPS，并查看 WebRTC 统计。
+与 **TeamSpeak 6 原生客户端**互通时仍是点对点：双方经 WebRTC/ICE 直连（复用语音的同一套 ICE 配置——自建 STUN 与按需配置的外部 TURN），WebSpeak 只负责会话鉴权、共享状态与 SDP/ICE 信令转发，**不承载**这段媒体流量；配置了 TURN 时媒体可能经过该外部 TURN，但不会经过 WebSpeak 网关。
 
 ### 2. 中继模式
 
@@ -177,6 +179,8 @@ docker run -d --name webspeak-relay --restart unless-stopped --network host \
 | 发布包 | 不安装 Node.js 和构建依赖 | Windows x64 或 Linux x64 |
 | 源码运行 | 开发、调试和二次开发 | Node.js 22.5+、Git 和本地编译工具 |
 
+> Docker 是可选的：也可以把构建产物交给 systemd 单元直接运行（`ExecStart=node dist/index.js`，工作目录为部署目录，数据在 `data/`），适合不允许安装 Docker 的主机。升级方式相应变为「本地构建 → 替换产物 → 重启服务」。
+
 ### Docker Compose（推荐）
 
 ```bash
@@ -212,16 +216,16 @@ docker compose up -d
 ```bash
 git clone https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak.git
 cd WebSpeak-client-for-TeamSpeak
-npm ci --ignore-scripts
+npm ci --ignore-scripts     # 跳过 mediasoup 的 postinstall：worker 二进制随仓库 vendor/ 提供
+npm run verify:worker       # 校验 vendor/mediasoup-worker/ 的 SHA256
 npm run prepare:sdk
-npm rebuild @discordjs/opus --foreground-scripts
 npm --prefix web ci
 npm --prefix web run build
 npm run build
 npm start
 ```
 
-构建 `@discordjs/opus` 需要 Python、Make 和 C/C++ 编译工具。
+生产运行时**不需要任何原生转码依赖**（`@discordjs/opus` 已移至 `devDependencies`，仅供离线测试；要跑测试时再执行 `npm rebuild @discordjs/opus`）。运行完整回归测试：`npm test`——串联 worker 校验与编解码、说话人映射、上行管线、设备切换、屏幕共享 SFU、端到端、TURN 凭据共 8 个套件。
 
 ### 首次配置
 

@@ -69,15 +69,17 @@ Die Medien laufen über die integrierte **mediasoup**-Engine (einzige Engine): S
 - `WEBSPEAK_MAX_SPEAKERS`: gleichzeitig publizierte Sprecher pro Sitzung (1–64, Standard 32).
 - `WEBSPEAK_MEDIA_PUBLIC_HOST`: öffentliche Medienadresse für Proxy-/Port-Mapping-Setups (wird als `announcedAddress` in den ICE-Kandidaten geschrieben); weglassen, wenn Medien- und Listen-Adresse identisch sind.
 
-### ICE-Kandidaten für Bildschirmfreigabe
+### Bildschirmfreigabe (zentrale SFU-Weiterleitung)
 
-Die Medien der Bildschirmfreigabe versuchen weiterhin eine direkte Browser-zu-Browser-Verbindung; WebSpeak leitet nur die Signalisierung weiter. Die Bildschirmfreigabe nutzt dieselbe ICE-Konfiguration wie die Sprach-WebRTC-Verbindung (eigenes STUN sowie optional ein externer TURN-Dienst); dafür ist nichts zusätzlich zu konfigurieren. STUN überträgt keine Medien.
+Bildschirmfreigaben zwischen Web-Zuschauern laufen über die **zentrale mediasoup-SFU-Weiterleitung** des WebSpeak-Gateways: Der Teilende sendet **einen** Stream an das Gateway, das ihn bedarfsgerecht an jeden Zuschauer verteilt. Zusätzliche Zuschauer erhöhen die Upload-Bandbreite des Teilenden daher **nicht**, und es ist keine Browser-zu-Browser-Verbindung nötig – es funktioniert auch hinter symmetrischem NAT, Firmennetzen oder Mobilfunk-Hotspots.
 
-Mit TURN kann die Medienübertragung diesen externen Dienst verwenden, aber niemals das WebSpeak-Gateway. Ohne TURN werden nur direkte ICE-Pfade und STUN verwendet.
+- **Zwei Spuren**: Bildschirmvideo und Systemaudio (wenn im Browser-Dialog „Audio teilen“ aktiviert ist) sind getrennte Spuren und bleiben beim Zuschauer synchron.
+- **Codec**: bevorzugt H.264 (Hardware-Encoding über die GPU, geringe CPU-Last), sonst VP8.
+- **Auflösung und Bildrate**: In den Freigabeeinstellungen sind bis zu 1080p und 60 FPS wählbar; die Aufnahme überschreitet nie die gewählte Quelle selbst (bei einem Tab ist das dessen Viewport). Unter Bandbreitendruck richtet sich die Entscheidung nach der Quelle: **Tab-/Fensterfreigaben behalten die Auflösung** (Dokumente und Code bleiben lesbar), **Ganzbildschirm-Freigaben mit ≥30 FPS behalten die Bildrate** (Video und Spiele bleiben flüssig).
+- **Zuschauerseite**: Live-Status, Zuschauerzahl, Lautstärke, Vollbild und Beenden; bis zu **32** Web-Zuschauer pro Freigabe.
+- **Leistungsanzeige**: zeigt die Aufnahmegröße neben der tatsächlichen kodierten Ausgabegröße, Bildrate, Bitrate, Verluste und den begrenzenden Grund – so lässt sich erkennen, ob die Aufnahme, die Kodierung oder das Netzwerk der Engpass ist.
 
-### Plattformübergreifendes P2P-Bildschirmteilen
-
-Browsernutzer und native TeamSpeak-6-Clients können Bildschirmfreigaben gegenseitig erkennen, starten und ansehen. Zwischen Browsern sowie zwischen Browser und nativem Client werden die Bildschirmmedien möglichst über eine direkte WebRTC/ICE-Peer-to-Peer-Verbindung übertragen; WebSpeak übernimmt Sitzungsberechtigung, Freigabestatus und SDP-/ICE-Signalisierung, transportiert aber keine Bildschirmmedien. Die Oberfläche zeigt Live-Status und Zuschauerzahl und bietet Lautstärke-, Vollbild- und Beenden-Steuerung. Für die Aufnahme stehen bis zu 1080p und 60 FPS sowie WebRTC-Statistiken zur Verfügung.
+Die Interoperabilität mit dem **nativen TeamSpeak-6-Client** bleibt Peer-to-Peer: Beide Seiten verbinden sich direkt über WebRTC/ICE (dieselbe ICE-Konfiguration wie bei Sprache – eigenes STUN und optional ein externer TURN-Dienst), und WebSpeak übernimmt nur Sitzungsberechtigung, Freigabestatus und SDP-/ICE-Signalisierung – es transportiert diese Medien **nicht**. Mit TURN kann das Medium diesen externen Dienst nutzen, niemals aber das WebSpeak-Gateway.
 
 ### 2. Relay-Modus
 
@@ -177,6 +179,8 @@ Vollständige Historie: [CHANGELOG.md](../CHANGELOG.md).
 | Release-Paket | Betrieb ohne Node.js und Build-Werkzeuge | Windows x64 oder Linux x64 |
 | Aus dem Quellcode | Entwicklung und Anpassungen | Node.js 22.5+, Git und native Build-Werkzeuge |
 
+> Docker ist optional: Die gebaute Ausgabe kann auch direkt in einer systemd-Unit laufen (`ExecStart=node dist/index.js`, Arbeitsverzeichnis = Deployment-Ordner, Daten in `data/`). Das passt zu Hosts, auf denen Docker nicht erlaubt ist. Ein Upgrade bedeutet dann „lokal bauen → Artefakte ersetzen → Dienst neu starten“.
+
 ### Docker Compose (empfohlen)
 
 ```bash
@@ -212,16 +216,16 @@ Das passende `windows-x64.zip` oder `linux-x64.tar.gz` aus den [GitHub Releases]
 ```bash
 git clone https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak.git
 cd WebSpeak-client-for-TeamSpeak
-npm ci --ignore-scripts
+npm ci --ignore-scripts     # überspringt mediasoups postinstall: das Worker-Binary liegt in vendor/
+npm run verify:worker       # prüft den SHA256 von vendor/mediasoup-worker/
 npm run prepare:sdk
-npm rebuild @discordjs/opus --foreground-scripts
 npm --prefix web ci
 npm --prefix web run build
 npm run build
 npm start
 ```
 
-Für den Bau von `@discordjs/opus` werden Python, Make und eine C/C++-Toolchain benötigt.
+Die Produktionslaufzeit benötigt **keine native Transcoding-Abhängigkeit**: `@discordjs/opus` liegt jetzt in `devDependencies` und wird nur von den Offline-Tests verwendet (für Tests ggf. `npm rebuild @discordjs/opus` ausführen). Die vollständige Regressionssuite läuft mit `npm test` – Worker-Prüfung plus Codec, Sprecher-Mapping, Upstream-Pipeline, Audiogeräte, Bildschirmfreigabe-SFU, End-to-End und TURN-Anmeldedaten, insgesamt acht Suiten.
 
 ### Erste Konfiguration
 

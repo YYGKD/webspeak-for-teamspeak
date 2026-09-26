@@ -69,15 +69,17 @@ Media is served by the built-in **mediasoup** engine (single engine): speakers a
 - `WEBSPEAK_MAX_SPEAKERS`: concurrent published speakers per session (1–64, default 32).
 - `WEBSPEAK_MEDIA_PUBLIC_HOST`: public media address for proxy/port-mapped deployments (written into the ICE candidate `announcedAddress`); omit it when the media address equals the listen address.
 
-### Screen-share ICE candidates
+### Screen sharing (SFU central forwarding)
 
-Screen-share media still prefers a direct browser-to-browser path; WebSpeak only relays negotiation signaling. Screen sharing reuses the same ICE configuration as voice WebRTC (your own STUN, plus an optional external TURN), so there is nothing extra to configure for it; STUN does not carry media.
+Screen sharing between web viewers goes through **mediasoup SFU central forwarding** in the WebSpeak gateway: the sharer pushes **one** stream to the gateway, and the gateway fans it out to each viewer on demand. Adding viewers therefore does **not** increase the sharer's upstream bandwidth, and no browser-to-browser connection is needed — it works even when both sides sit behind symmetric NAT, a corporate network, or a mobile hotspot.
 
-With TURN configured, media may use that external TURN service but never the WebSpeak gateway; without it, only direct ICE paths and STUN are used.
+- **Dual track**: screen video and system audio (when "share audio" is ticked in the browser picker) are separate tracks, kept in sync on the viewer side.
+- **Codec**: H.264 preferred (GPU hardware encoding, low CPU), falling back to VP8.
+- **Resolution and frame rate**: share settings offer up to 1080p and 60 FPS; the capture never exceeds the selected source itself (for a tab, that ceiling is the tab's viewport). Under bandwidth pressure the trade-off follows the source: **tab/window shares keep resolution** (documents and code stay legible), while **whole-screen shares at ≥30 FPS keep frame rate** (video and games stay smooth).
+- **Viewer side**: live status, viewer count, player volume, fullscreen and exit controls; up to **32** web viewers per share.
+- **Performance panel**: shows the capture size next to the actual encoded output size, frame rate, bitrate, loss and limiting reason, so you can tell whether the bottleneck is capture, encoding, or the network.
 
-### Cross-platform P2P screen sharing
-
-Browser users and native TeamSpeak 6 clients can discover, start, and watch each other's screen shares. Screen media between browsers, and between a browser and a native client, is sent over a WebRTC/ICE peer-to-peer path whenever possible; WebSpeak handles session authorization, share state, and SDP/ICE signaling, but does not carry the screen media. The UI includes live status, viewer count, player volume, fullscreen, and exit controls. Share settings support up to 1080p and 60 FPS, with live WebRTC statistics for diagnosis.
+Interop with the **native TeamSpeak 6 client** remains peer-to-peer: both sides connect directly over WebRTC/ICE (reusing the same ICE configuration as voice — your own STUN plus an optional external TURN), and WebSpeak only handles session authorization, share state, and SDP/ICE signaling — it does **not** carry that media. With TURN configured the media may use that external service, but never the WebSpeak gateway.
 
 ### 2. Relay mode
 
@@ -177,6 +179,8 @@ See the complete history in [CHANGELOG.md](../CHANGELOG.md).
 | Release package | Running without Node.js or build dependencies | Windows x64 or Linux x64 |
 | From source | Development, debugging, and customization | Node.js 22.5+, Git, and native build tools |
 
+> Docker is optional: you can also run the built output directly under a systemd unit (`ExecStart=node dist/index.js`, working directory set to the deployment folder, data in `data/`), which suits hosts where Docker is not allowed. Upgrading then means "build locally → replace the artifacts → restart the service".
+
 ### Docker Compose (recommended)
 
 ```bash
@@ -212,16 +216,16 @@ Download the matching `windows-x64.zip` or `linux-x64.tar.gz` from [GitHub Relea
 ```bash
 git clone https://github.com/EchoSixHIYA/WebSpeak-client-for-TeamSpeak.git
 cd WebSpeak-client-for-TeamSpeak
-npm ci --ignore-scripts
+npm ci --ignore-scripts     # skips mediasoup's postinstall: the worker binary ships in vendor/
+npm run verify:worker       # verifies the SHA256 of vendor/mediasoup-worker/
 npm run prepare:sdk
-npm rebuild @discordjs/opus --foreground-scripts
 npm --prefix web ci
 npm --prefix web run build
 npm run build
 npm start
 ```
 
-Building `@discordjs/opus` requires Python, Make, and a C/C++ toolchain.
+The production runtime needs **no native transcoding dependency**: `@discordjs/opus` now lives in `devDependencies` and is only used by the offline tests (run `npm rebuild @discordjs/opus` if you want to execute them). Run the full regression suite with `npm test` — worker verification plus codec, speaker map, upstream pipeline, audio device, screen-share SFU, end-to-end and TURN-credentials, eight suites in total.
 
 ### First-time setup
 
