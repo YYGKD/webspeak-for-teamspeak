@@ -244,12 +244,13 @@ npm start
 
 | 项目 | 要求或注意事项 |
 | --- | --- |
-| 浏览器 | 建议使用最新版 Chrome、Edge 或其他支持 WebRTC 的现代浏览器。麦克风和窗口音频通常要求 HTTPS。 |
+| 浏览器 | 支持基线：**Chrome / Edge 94+ · Firefox 102+ · Safari 15.4+**（含 iOS Safari 与 Android Chrome）。麦克风和窗口音频通常要求 HTTPS。各内核差异与降级方案见仓库根目录 README 的「浏览器兼容性」一节。 |
+| 输出设备选择 | 只有 Chromium 系能真正切换扬声器（`AudioContext.setSinkId`）。Firefox 116+ 虽有 `HTMLMediaElement.setSinkId`，但没有 `AudioContext.setSinkId`，而本应用的出声来自 WebAudio 图，因此同样回落系统默认设备；设置面板会明确说明。 |
+| 伴奏 | 仅 Chromium 桌面端提供且要求 WebRTC；Firefox/Safari 的 `getDisplayMedia` 不提供显示音频轨，因此该入口在这些内核上不可用。选择窗口或标签页时还要勾选共享音频。 |
 | TeamSpeak 网络 | WebSpeak 主机必须能够访问目标 TeamSpeak；默认语音端口为 `9987`。 |
 | Web 服务网络 | 服务使用 `3040/TCP`，公网建议通过 HTTPS 反向代理提供网页和 WebSocket。 |
 | IPv6 | IPv6 字面量写为 `[2001:db8::1]#9987`。主机/容器需要可路由 IPv6、启用 IPv6 的操作系统和 Node.js，以及相应防火墙放行。 |
 | WebRTC | 默认使用 `40000–40099` 的 UDP 与 TCP，启用后需放行整个范围；修改范围前先关闭 WebRTC。 |
 | 身份保持 | 同一浏览器身份同时只能保持一条活动连接；并行连接请关闭第二条的身份保持或使用其他浏览器配置文件。 |
-| 伴奏 | 仅桌面端提供且要求 WebRTC；选择窗口或标签页时还要勾选共享音频。 |
 | 数据 | Docker 数据在 `webspeak-data` volume；发布包和源码运行数据在 `data/`。升级前建议备份。 |
 | 会话上限 | 单实例最多允许 100 个活动网页会话。 |

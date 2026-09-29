@@ -244,12 +244,13 @@ The production runtime needs **no native transcoding dependency**: `@discordjs/o
 
 | Area | Requirement or note |
 | --- | --- |
-| Browser | Use a current Chrome, Edge, or other modern browser with WebRTC support. Microphone and window audio normally require HTTPS. |
+| Browser | Supported baseline: **Chrome / Edge 94+ · Firefox 102+ · Safari 15.4+** (including iOS Safari and Android Chrome). Microphone and window audio normally require HTTPS. Per-engine differences and fallbacks are listed under “Browser Compatibility” in the repository README. |
+| Output device selection | Only Chromium engines can genuinely switch speakers (`AudioContext.setSinkId`). Firefox 116+ has `HTMLMediaElement.setSinkId` but no `AudioContext.setSinkId`, and this app's audible output comes from the WebAudio graph, so Firefox also falls back to the system default device; the settings panel says so explicitly. |
+| Accompaniment | Chromium desktop only, and requires WebRTC. Firefox/Safari `getDisplayMedia` exposes no display audio track, so the entry point is unavailable there. Enable audio sharing when selecting a window or tab. |
 | TeamSpeak network | The WebSpeak host must reach the target TeamSpeak server; the default voice port is `9987`. |
 | Web network | The service uses `3040/TCP`; public deployments should expose the page and WebSocket through an HTTPS reverse proxy. |
 | IPv6 | Write literal targets as `[2001:db8::1]#9987`. The host/container needs routed IPv6, IPv6 enabled in the OS and Node.js, and the relevant firewall rules. |
 | WebRTC | The default range is `40000–40099` for UDP and TCP; allow it and disable WebRTC before changing the range. |
 | Remembered identity | One browser identity can hold one active remembered connection. Disable it for parallel connections or use another browser profile. |
-| Accompaniment | Desktop only and requires WebRTC. Enable audio sharing when selecting a window or tab. |
 | Data | Docker data is in `webspeak-data`; release packages and source installs use `data/`. Back up before upgrades. |
 | Session limit | One instance accepts up to 100 active browser sessions. |

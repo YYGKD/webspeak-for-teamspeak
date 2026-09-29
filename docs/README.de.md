@@ -244,12 +244,13 @@ Die Produktionslaufzeit benötigt **keine native Transcoding-Abhängigkeit**: `@
 
 | Bereich | Hinweis |
 | --- | --- |
-| Browser | Aktuelles Chrome, Edge oder ein moderner WebRTC-fähiger Browser wird empfohlen. Mikrofon- und Fenster-Audio benötigen normalerweise HTTPS. |
+| Browser | Unterstützte Basis: **Chrome / Edge 94+ · Firefox 102+ · Safari 15.4+** (inklusive iOS-Safari und Android-Chrome). Mikrofon- und Fenster-Audio benötigen normalerweise HTTPS. Die Unterschiede und Rückfallwege je Engine stehen im Repository-README unter „Browser Compatibility“. |
+| Ausgabegerät | Nur Chromium-Engines können Lautsprecher wirklich umschalten (`AudioContext.setSinkId`). Firefox 116+ hat `HTMLMediaElement.setSinkId`, aber kein `AudioContext.setSinkId`; da die hörbare Ausgabe dieser Anwendung aus dem WebAudio-Graphen kommt, fällt auch Firefox auf das Systemstandardgerät zurück. Das Einstellungsfeld weist ausdrücklich darauf hin. |
+| Begleitton | Nur Chromium-Desktop und erfordert WebRTC. `getDisplayMedia` liefert in Firefox/Safari keine Bildschirmtonspur, daher ist der Einstieg dort nicht verfügbar. Bei Fenster- oder Tab-Freigabe auch Audio freigeben. |
 | TeamSpeak-Netzwerk | Der WebSpeak-Host muss den Zielserver erreichen können; der Standard-Sprachport ist `9987`. |
 | Webnetzwerk | Der Dienst verwendet `3040/TCP`; öffentlich sollte ein HTTPS-Reverse-Proxy für Seite und WebSocket verwendet werden. |
 | IPv6 | Literale Ziele als `[2001:db8::1]#9987` eintragen. Host/Container benötigen geroutetes IPv6, aktiviertes IPv6 in Betriebssystem und Node.js sowie passende Firewall-Regeln. |
 | WebRTC | Standardbereich `40000–40099` für UDP und TCP; den gesamten Bereich freigeben und WebRTC vor einer Änderung deaktivieren. |
 | Gespeicherte Identität | Eine Browseridentität kann nur eine aktive gespeicherte Verbindung halten. Für parallele Verbindungen deaktivieren oder ein anderes Browserprofil verwenden. |
-| Begleitton | Nur auf dem Desktop verfügbar und WebRTC erforderlich. Bei Fenster- oder Tab-Freigabe auch Audio freigeben. |
 | Daten | Docker verwendet `webspeak-data`; Release-Pakete und Quellcode verwenden `data/`. Vor Updates sichern. |
 | Sitzungslimit | Eine Instanz akzeptiert bis zu 100 aktive Browser-Sitzungen. |

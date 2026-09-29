@@ -1,10 +1,22 @@
 import { reactive, ref } from "vue";
-import { RnnoiseWorkletNode, loadRnnoise } from "@sapphi-red/web-noise-suppressor";
+/**
+ * 必须**惰性**加载降噪包：它的模块顶层就有
+ * `class RnnoiseWorkletNode extends AudioWorkletNode {}`，在没有 AudioWorklet
+ * 的内核（旧 WebKit、关闭了 AudioWorklet 的加固配置、部分 WebView）里，
+ * 静态 import 会在应用启动时直接抛 `ReferenceError: AudioWorkletNode is not
+ * defined`，把整个页面打挂 —— 那样 `startMicrophone` 里的 ScriptProcessor
+ * 兜底永远没有机会执行。这里只保留**类型**导入（编译期擦除，不产生运行时
+ * 依赖），真正的模块在 `createRnnoiseNode()` 里按需 `await import()`，
+ * 那里已经有 try/catch，降噪失败只会退化成浏览器原生降噪。
+ */
+import type { RnnoiseWorkletNode } from "@sapphi-red/web-noise-suppressor";
 import rnnoiseSimdWasmUrl from "@sapphi-red/web-noise-suppressor/rnnoise_simd.wasm?url";
 import rnnoiseWasmUrl from "@sapphi-red/web-noise-suppressor/rnnoise.wasm?url";
 import rnnoiseWorkletUrl from "@sapphi-red/web-noise-suppressor/rnnoiseWorklet.js?url";
 import { loadLocalPreferences, saveLocalPreferences } from "../services/local-persistence.js";
 import { MediaClient } from "../services/media-client.js";
+import { getBrowserCapabilities, getBrowserSupportReport } from "../services/browser-support.js";
+import type { BrowserCapabilities, BrowserSupportReport } from "../services/browser-support.js";
 import type {
   AppData,
   DtlsParameters,
@@ -250,9 +262,36 @@ type SinkAudioContext = AudioContext & {
   setSinkId?: (sinkId: string) => Promise<void>;
 };
 
-type SinkAudioElement = HTMLAudioElement & {
-  setSinkId?: (sinkId: string) => Promise<void>;
-};
+/**
+ * 跨内核的「远端音频到底有没有解码出来」判据。
+ *
+ * `webkitAudioDecodedByteCount` 只有 Blink/WebKit 有，Gecko 没有等价计数器。
+ * 但三个内核都通过 `getStats()` 暴露 inbound-rtp 的 `totalAudioEnergy` /
+ * `audioLevel`：前者是累计值，只要在增长就说明解码器确实在产出音频，
+ * 后者是瞬时电平。用它补上 Gecko 的诊断盲区。
+ */
+async function readConsumerAudioEnergy(
+  consumer: MediaConsumer,
+  enabled: boolean,
+): Promise<{ totalAudioEnergy: number | null; audioLevel: number | null; bytesReceived: number | null } | null> {
+  if (!enabled) return null;
+  try {
+    const report = await consumer.getStats();
+    let result: { totalAudioEnergy: number | null; audioLevel: number | null; bytesReceived: number | null } | null = null;
+    report.forEach((entry: Record<string, unknown>) => {
+      if (entry.type !== "inbound-rtp" || entry.kind !== "audio") return;
+      result = {
+        totalAudioEnergy: typeof entry.totalAudioEnergy === "number" ? entry.totalAudioEnergy : null,
+        audioLevel: typeof entry.audioLevel === "number" ? entry.audioLevel : null,
+        bytesReceived: typeof entry.bytesReceived === "number" ? entry.bytesReceived : null,
+      };
+    });
+    return result;
+  } catch {
+    // Consumer 正在关闭时 getStats() 会抛错：只是一次采样失败。
+    return null;
+  }
+}
 
 export interface ChannelInfo {
   id: string;
@@ -640,12 +679,20 @@ export function useVoiceWebSocket() {
   let rnnoiseNode: RnnoiseWorkletNode | null = null;
   let rnnoiseWorkletModulePromise: Promise<void> | null = null;
   let rnnoiseWasmPromise: Promise<ArrayBuffer> | null = null;
+  /** 降噪包的 in-flight 动态 import；成功后一直复用。 */
+  let noiseSuppressorPromise: Promise<typeof import("@sapphi-red/web-noise-suppressor")> | null = null;
   let micSource: MediaStreamAudioSourceNode | null = null;
   let micGain: GainNode | null = null;
   let silentGain: GainNode | null = null;
   let processedMicDestination: MediaStreamAudioDestinationNode | null = null;
   const accompanimentActive = ref(false);
-  const accompanimentSupported = ref(typeof navigator !== "undefined" && Boolean(navigator.mediaDevices?.getDisplayMedia));
+  // 伴奏共享 = 显示采集 + 显示音频轨。Gecko/WebKit 的 getDisplayMedia 只给视频轨，
+  // 所以只判断 getDisplayMedia 存在是不够的：那会让用户走到「选了来源却没有声音」的死路。
+  const accompanimentSupported = ref(
+    typeof navigator !== "undefined"
+    && Boolean(navigator.mediaDevices?.getDisplayMedia)
+    && getBrowserCapabilities().displayAudioCapture,
+  );
   const accompanimentErrorCode = ref<"" | "unsupported" | "needsWebRtc" | "noAudio" | "permission">("");
   let accompanimentStream: MediaStream | null = null;
   const screenShareStreams = reactive<ScreenShareStream[]>([]);
@@ -713,7 +760,20 @@ export function useVoiceWebSocket() {
   const outputDevices = reactive<AudioOutputDevice[]>([]);
   const selectedInputDeviceId = ref(typeof localStorage !== "undefined" ? localStorage.getItem("webspeak:input-device") ?? "" : "");
   const selectedOutputDeviceId = ref(typeof localStorage !== "undefined" ? localStorage.getItem("webspeak:output-device") ?? "" : "");
-  const outputDeviceSupported = ref(false);
+  /**
+   * 浏览器兼容性状态：内核识别 + 能力矩阵 + 降级清单。
+   *
+   * 会话建立时算一次就固定（能力在页面生命周期内不变），UI 与语音链路都读它，
+   * 不再各自做特性探测。`capabilities` 是热路径上最常读的字段，单独提出来。
+   */
+  const browserSupport = ref<BrowserSupportReport>(getBrowserSupportReport());
+  const capabilities: BrowserCapabilities = getBrowserCapabilities();
+  /**
+   * 扬声器选择按 `outputRoutingMode !== "none"` 显隐：Chromium 与 Firefox 都能在
+   * 页面内切换输出（前者改 AudioContext 的 sink，后者走惰性的元素路由），
+   * 因此两边露出同一个控件、体验一致；只有无任何 sink API 的 WebKit 才显示说明。
+   */
+  const outputDeviceSupported = ref(capabilities.outputRoutingMode !== "none");
   const audioPermission = ref<AudioPermission>("unknown");
   const microphoneProcessing = reactive<MicrophoneProcessingSettings>({
     echoCancellation: null,
@@ -823,10 +883,20 @@ export function useVoiceWebSocket() {
       audioCtx.addEventListener("statechange", () => {
         if (audioCtx) audioContextState.value = audioCtx.state;
       });
-      outputDeviceSupported.value = typeof audioCtx.setSinkId === "function"
-        || typeof (HTMLMediaElement.prototype as SinkAudioElement).setSinkId === "function";
+      // 显隐由能力矩阵给出的路由方式决定（Chromium 与 Firefox 都可用），这里只做
+      // 一次兜底校准：audioContext 模式下还要确认实例上真有 setSinkId。
+      outputDeviceSupported.value = capabilities.outputRoutingMode === "audioContext"
+        ? typeof audioCtx.setSinkId === "function"
+        : capabilities.outputRoutingMode === "mediaElement";
       if (selectedOutputDeviceId.value && outputDeviceSupported.value) {
-        void setAudioSink(audioCtx, selectedOutputDeviceId.value).catch(() => undefined);
+        // 恢复上次选择的扬声器。Firefox 的元素路由需要一个能发声的元素，若被
+        // 自动播放策略拦下，就放弃这个偏好（而不是让 UI 显示一个实际没生效的设备），
+        // 并提示用户点击页面——UI 状态与实际输出始终一致。
+        void setOutputRouting(audioCtx, selectedOutputDeviceId.value).catch(() => {
+          selectedOutputDeviceId.value = "";
+          localStorage.setItem("webspeak:output-device", "");
+          setAudioNotice("PLAYBACK_BLOCKED", "浏览器阻止了自动播放：选中的扬声器未能生效，已回到默认输出设备。点击页面后可从设置重新选择");
+        });
       }
     }
     return audioCtx;
@@ -881,36 +951,136 @@ export function useVoiceWebSocket() {
     return `音频链路异常（错误代码：${code}）${detailText ? `：${detailText}` : ""}，麦克风声音可能没有发送给其他成员`;
   }
 
-  async function setAudioSink(ctx: SinkAudioContext, deviceId: string): Promise<void> {
-    const mediaSinkSupported = typeof (HTMLMediaElement.prototype as SinkAudioElement).setSinkId === "function";
-    if (!ctx.setSinkId && !mediaSinkSupported) {
-      outputDeviceSupported.value = false;
-      if (deviceId) throw new Error("当前浏览器不支持扬声器设备选择，将使用默认输出设备");
-      return;
+  /**
+   * 惰性元素路由：只有 `HTMLMediaElement.setSinkId` 可用时（Firefox）才需要。
+   *
+   * 把可听图接到 `mix`，再用一个**不静音**的元素播放它并 setSinkId —— 实测这是
+   * 唯一能把 WebAudio 输出改道到指定设备的办法（单独给元素 setSinkId 改不了
+   * WebAudio 图，见 `.local/browser-verify/audio-findings.md`）。
+   *
+   * 只有在用户**真的选了非默认设备**时才建立，因此默认路径不承担任何额外缓冲：
+   * Chrome 走 `AudioContext.setSinkId`，Firefox 不选设备时走 `ctx.destination`。
+   */
+  let elementOutputRouting: {
+    mix: MediaStreamAudioDestinationNode;
+    element: HTMLAudioElement;
+    deviceId: string;
+  } | null = null;
+
+  /** 当前可听总线：建立了元素路由就是混音节点，否则是 AudioContext 的 destination。 */
+  function outputBus(ctx: AudioContext): AudioNode {
+    return elementOutputRouting?.mix ?? ctx.destination;
+  }
+
+  /** 把已建立的说话人节点全部改接到当前总线（总线切换的唯一收口）。 */
+  function rewireSpeakerNodes(ctx: AudioContext): void {
+    const bus = outputBus(ctx);
+    for (const node of speakerNodes.values()) {
+      try { node.analyserNode.disconnect(); } catch { /* 已断开 */ }
+      try { node.analyserNode.connect(bus); } catch { /* 竞态里轨道已结束 */ }
     }
-    outputDeviceSupported.value = true;
-    if (ctx.setSinkId) await ctx.setSinkId(deviceId || "default");
   }
 
   /**
-   * 把输出设备同步到已建立的拉流元素上：Chrome 的远端接收流由静音 <audio> 元素驱动，
-   * 只改 AudioContext 不会让旧节点改道，必须逐个重定向，否则切换扬声器后旧说话人仍从原设备出声。
+   * 拆卸元素路由：可听图回到 `ctx.destination`，额外缓冲随之消失。
+   * 先清空状态再改接，`outputBus()` 才会解析回 destination。
    */
-  function applySpeakerSink(deviceId: string): void {
-    const sinkId = deviceId || "default";
-    for (const node of speakerNodes.values()) {
-      const element = node.element as SinkAudioElement;
-      if (typeof element.setSinkId !== "function") continue;
-      void element.setSinkId(sinkId).catch(() => undefined);
-    }
+  function releaseElementOutputRouting(ctx: AudioContext): void {
+    if (!elementOutputRouting) return;
+    const { element } = elementOutputRouting;
+    elementOutputRouting = null;
+    try {
+      element.pause();
+      element.srcObject = null;
+    } catch { /* 幂等 */ }
+    rewireSpeakerNodes(ctx);
   }
 
+  /**
+   * 切换可听输出的目标设备。
+   *
+   * - `deviceId` 为空 = 系统默认：Chromium 交回默认 sink，Firefox 直接拆掉元素
+   *   路由（零额外开销）。
+   * - Chromium（`audioContext` 模式）：改 `AudioContext.setSinkId`，整个上下文
+   *   一起改道，图上不用动。
+   * - Firefox（`mediaElement` 模式）：建立/复用元素路由并改接总线。
+   *
+   * 失败一律抛出，由 `setOutputDevice` 负责回滚到上一个设备。
+   */
+  async function setOutputRouting(ctx: SinkAudioContext, deviceId: string): Promise<void> {
+    if (capabilities.outputRoutingMode === "none") {
+      if (deviceId) throw new Error("当前浏览器无法在页面内切换扬声器");
+      return;
+    }
+
+    if (capabilities.outputRoutingMode === "audioContext") {
+      if (!deviceId) releaseElementOutputRouting(ctx); // 理论上不会建立，防御性收口
+      if (typeof ctx.setSinkId === "function") await ctx.setSinkId(deviceId || "default");
+      return;
+    }
+
+    // mediaElement 模式（Firefox）
+    if (!deviceId) {
+      releaseElementOutputRouting(ctx);
+      return;
+    }
+    // 先在本地把元素准备好，**成功之后**才让 `elementOutputRouting` 上线。
+    // 否则 setSinkId/play 失败时总线已经指向一条不出声的混音，新来的说话人会被
+    // 接到静音链路上（而且没有报错）。
+    const existing = elementOutputRouting;
+    const isNew = !existing;
+    const routing = existing ?? (() => {
+      const mix = ctx.createMediaStreamDestination();
+      const element = new Audio();
+      element.autoplay = true;
+      // 不静音：这条链路才是真正出声的。音量/静音仍由 WebAudio 图负责。
+      element.srcObject = mix.stream;
+      return { mix, element, deviceId: "" };
+    })();
+    try {
+      await routing.element.setSinkId(deviceId);
+      await routing.element.play();
+    } catch (error) {
+      if (isNew) {
+        try {
+          routing.element.pause();
+          routing.element.srcObject = null;
+        } catch { /* 幂等 */ }
+      }
+      throw error instanceof Error ? error : new Error("浏览器阻止了音频播放，请点击页面后重试");
+    }
+    elementOutputRouting = routing;
+    routing.deviceId = deviceId;
+    rewireSpeakerNodes(ctx);
+  }
+
+  /**
+   * 兼容性检查：返回阻断性原因的本地化键（中文原文），可用时返回 null。
+   *
+   * 判定全部交给 `browser-support.ts` 的能力矩阵 —— 这里不再列举
+   * `navigator.mediaDevices` 之类的条件，避免两处规则漂移。
+   */
   function checkSupport(): string | null {
     if (typeof window === "undefined") return null;
-    if (!window.isSecureContext) return "语音功能需要 HTTPS 安全连接";
-    if (!navigator.mediaDevices?.getUserMedia) return "当前浏览器不支持麦克风访问";
-    if (typeof AudioContext === "undefined") return "当前浏览器不支持 Web Audio 音频处理";
-    return null;
+    return getBrowserSupportReport().blockingReason;
+  }
+
+  /**
+   * 按内核能力筛选显示采集约束。
+   *
+   * `displaySurface` / `selfBrowserSurface` / `systemAudio` / `windowAudio` 都是
+   * Chromium 专有提示：Gecko 会忽略未知成员，WebKit 则可能在拿到
+   * `TypeError` 后整段拒绝。所以只在内核确认支持时才带上。
+   */
+  function displayMediaOptions(audio: boolean): DisplayMediaStreamOptions {
+    const options: Record<string, unknown> = { video: true, audio: audio && capabilities.displayAudioCapture };
+    if (capabilities.displayCaptureHints) {
+      options.video = { displaySurface: "browser" };
+      options.selfBrowserSurface = "exclude";
+      options.systemAudio = "include";
+      options.windowAudio = "window";
+    }
+    return options as DisplayMediaStreamOptions;
   }
 
   function microphoneConstraints(): MediaTrackConstraints {
@@ -965,10 +1135,9 @@ export function useVoiceWebSocket() {
       localStorage.setItem("webspeak:output-device", "");
       void saveAudioPreferences();
       if (audioCtx && outputDeviceSupported.value) {
-        void setAudioSink(audioCtx, "").catch(() => undefined);
-        // 选中的扬声器已消失：回落默认设备时同样要唤醒上下文并同步拉流元素，避免静音悬挂。
+        // 选中的扬声器已消失：拆掉路由回落到默认设备，并唤醒上下文，避免静音悬挂。
+        void setOutputRouting(audioCtx, "").catch(() => undefined);
         if (audioCtx.state === "suspended") void audioCtx.resume().catch(() => undefined);
-        applySpeakerSink("");
         syncAudioContextNotice();
       }
     }
@@ -978,12 +1147,28 @@ export function useVoiceWebSocket() {
     await refreshAudioDevices();
   }
 
+  /**
+   * 降噪包的惰性加载器。模块顶层有 `extends AudioWorkletNode`，在没有
+   * AudioWorklet 的内核里一 import 就会抛错，所以只能在确认能力之后按需加载。
+   * 并发调用共享同一个 in-flight Promise，失败后清空以便重试。
+   */
+  async function loadNoiseSuppressor(): Promise<typeof import("@sapphi-red/web-noise-suppressor")> {
+    if (!noiseSuppressorPromise) {
+      noiseSuppressorPromise = import("@sapphi-red/web-noise-suppressor").catch((error) => {
+        noiseSuppressorPromise = null;
+        throw error;
+      });
+    }
+    return noiseSuppressorPromise;
+  }
+
   async function createRnnoiseNode(ctx: AudioContext): Promise<RnnoiseWorkletNode | null> {
     if (typeof AudioWorkletNode === "undefined" || !ctx.audioWorklet) {
       microphoneProcessing.rnnoise = false;
       return null;
     }
     try {
+      const { RnnoiseWorkletNode: RnnoiseNode, loadRnnoise } = await loadNoiseSuppressor();
       if (!rnnoiseWasmPromise) {
         rnnoiseWasmPromise = loadRnnoise({ url: rnnoiseWasmUrl, simdUrl: rnnoiseSimdWasmUrl }).catch((error) => {
           rnnoiseWasmPromise = null;
@@ -997,7 +1182,7 @@ export function useVoiceWebSocket() {
         });
       }
       const [wasmBinary] = await Promise.all([rnnoiseWasmPromise, rnnoiseWorkletModulePromise]);
-      const node = new RnnoiseWorkletNode(ctx, { maxChannels: 1, wasmBinary });
+      const node = new RnnoiseNode(ctx, { maxChannels: 1, wasmBinary });
       microphoneProcessing.rnnoise = true;
       return node;
     } catch {
@@ -1218,21 +1403,29 @@ export function useVoiceWebSocket() {
     const audioConstraints = { ...captureProcessingConstraints } as MediaTrackConstraints & { restrictOwnAudio?: boolean };
     const supportedConstraints = navigator.mediaDevices.getSupportedConstraints?.() as Record<string, boolean> | undefined;
     if (supportedConstraints?.restrictOwnAudio) audioConstraints.restrictOwnAudio = true;
-    const options = {
-      video: { displaySurface: "browser" },
-      audio: audioConstraints,
-      selfBrowserSurface: "exclude",
-      systemAudio: "include",
-      windowAudio: "window",
-    } as unknown as DisplayMediaStreamOptions;
+    // 提示项按内核筛选：WebKit 不认识这些 Chromium 专有成员，可能整段拒绝；
+    // 但音频约束本身是标准的，需要保留。
+    const options = { ...displayMediaOptions(true), audio: audioConstraints } as DisplayMediaStreamOptions;
 
     let nextStream: MediaStream;
     try {
       nextStream = await navigator.mediaDevices.getDisplayMedia(options);
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") return;
-      accompanimentErrorCode.value = "permission";
-      throw error;
+      // 部分内核（主要是旧 WebKit）会以 TypeError 拒绝含未知约束的字典：
+      // 退一步只带标准字段重试一次，让伴奏共享在这些内核上仍然可用。
+      if (error instanceof TypeError) {
+        try {
+          nextStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: audioConstraints });
+        } catch (retryError) {
+          if (retryError instanceof DOMException && retryError.name === "AbortError") return;
+          accompanimentErrorCode.value = "permission";
+          throw retryError;
+        }
+      } else {
+        accompanimentErrorCode.value = "permission";
+        throw error;
+      }
     }
     const audioTrack = nextStream.getAudioTracks()[0];
     nextStream.getVideoTracks().forEach((track) => track.stop());
@@ -1392,6 +1585,8 @@ export function useVoiceWebSocket() {
     stopWebRtcMix();
     stopWebRtcMicMonitor();
     stopSpeakerActivityMonitor();
+    // 拆掉元素路由（若已建立）：总线回到 ctx.destination，发声元素停止并释放。
+    if (audioCtx) releaseElementOutputRouting(audioCtx);
     releaseAllSpeakerNodes();
     pendingSpeakerProducers.length = 0;
     micProducer = null;
@@ -1579,19 +1774,15 @@ export function useVoiceWebSocket() {
       analyser.fftSize = 256;
       source.connect(gain);
       gain.connect(analyser);
-      analyser.connect(ctx.destination);
+      analyser.connect(outputBus(ctx));
       element = new Audio();
       element.autoplay = true;
       element.muted = true;
       element.srcObject = stream;
       void element.play().catch(() => undefined);
-      // 新入说话人继承当前选择的输出设备：元素支持 setSinkId 时才重定向，否则保持系统默认。
-      if (selectedOutputDeviceId.value) {
-        const sinkElement = element as SinkAudioElement;
-        if (typeof sinkElement.setSinkId === "function") {
-          void sinkElement.setSinkId(selectedOutputDeviceId.value).catch(() => undefined);
-        }
-      }
+      // 这个元素是静音的，只负责驱动接收流，所以**不需要**跟着输出设备改道：
+      // Chromium 由 ctx.setSinkId 覆盖整个上下文，Firefox 由共享的混音元素改道，
+      // 两条路径都不依赖它。
       gain.gain.value = speakerGainValue(clientId);
       speakerNodes.set(clientId, {
         consumer,
@@ -1815,6 +2006,11 @@ export function useVoiceWebSocket() {
     micStream?.getTracks().forEach((track) => track.stop());
     micStream = null;
     if (closeContext) {
+      // 音频上下文即将销毁：元素路由挂在它上面，必须一起清掉，否则会留下一个
+      // 指向已关闭上下文的混音节点和一个仍在「播放」的空元素。
+      const closing = audioCtx;
+      if (closing) releaseElementOutputRouting(closing);
+      elementOutputRouting = null;
       audioCtx?.close();
       audioCtx = null;
       workletContext = null;
@@ -1860,22 +2056,37 @@ export function useVoiceWebSocket() {
     }
     try {
       await prepareInputDevices();
-      if (typeof MediaRecorder !== "undefined" && micStream) {
+      // MediaRecorder 在少数内核/隐私模式下不可用，或构造时因缺少受支持的
+      // MIME 而抛错。这两种情况都不是失败：自测退化为「只看实时电平」，
+      // 但 5 秒自动停止仍然要生效，否则测试态会一直挂着。
+      let recorder: MediaRecorder | null = null;
+      if (capabilities.mediaRecorder && micStream) {
+        try {
+          recorder = capabilities.preferredRecorderMimeType
+            ? new MediaRecorder(micStream, { mimeType: capabilities.preferredRecorderMimeType })
+            : new MediaRecorder(micStream);
+        } catch {
+          recorder = null;
+        }
+      }
+      if (recorder) {
         const chunks: Blob[] = [];
-        const recorder = new MediaRecorder(micStream);
         testRecorder = recorder;
         recorder.ondataavailable = (event) => {
           if (event.data.size) chunks.push(event.data);
         };
         recorder.onstop = () => {
           if (chunks.length) {
-            testAudioUrl.value = URL.createObjectURL(new Blob(chunks, { type: recorder.mimeType || "audio/webm" }));
+            // Safari 只产出 audio/mp4；用 recorder.mimeType 而不是写死 webm。
+            testAudioUrl.value = URL.createObjectURL(new Blob(chunks, { type: recorder?.mimeType || "audio/webm" }));
           }
           if (testRecorder === recorder) testRecorder = null;
         };
         recorder.start();
-        testRecorderTimer = setTimeout(() => stopMicrophoneTest(), 5_000);
+      } else if (!capabilities.mediaRecorder) {
+        setAudioNotice("RECORDER_UNAVAILABLE", "当前浏览器不支持本地录音回放，麦克风自测将只显示实时电平");
       }
+      testRecorderTimer = setTimeout(() => stopMicrophoneTest(), 5_000);
     } catch (error) {
       microphoneTestActive.value = false;
       throw error;
@@ -1899,17 +2110,17 @@ export function useVoiceWebSocket() {
     localStorage.setItem("webspeak:output-device", deviceId);
     try {
       const ctx = getAudioCtx();
-      await setAudioSink(ctx, deviceId);
+      await setOutputRouting(ctx, deviceId);
       // 切换输出设备会让部分浏览器挂起 AudioContext（输出时钟被重置），必须显式唤醒，
-      // 并把已建立的拉流元素一并改道，否则表现就是"设置里切了设备却一点声音都没有"。
+      // 否则表现就是"设置里切了设备却一点声音都没有"。
       if (ctx.state === "suspended") await ctx.resume();
-      applySpeakerSink(deviceId);
       syncAudioContextNotice();
       await saveAudioPreferences();
     } catch (error) {
       selectedOutputDeviceId.value = previousDeviceId;
       localStorage.setItem("webspeak:output-device", previousDeviceId);
-      applySpeakerSink(previousDeviceId);
+      // 回滚：把总线切回上一个设备。这一步失败不再向外抛，避免掩盖原始错误。
+      try { await setOutputRouting(getAudioCtx(), previousDeviceId); } catch { /* 保留原始错误 */ }
       syncAudioContextNotice();
       throw error;
     }
@@ -1938,7 +2149,7 @@ export function useVoiceWebSocket() {
       gain.gain.exponentialRampToValueAtTime(Math.max(0.0001, notificationVolume.value * effectiveOutputVolume() * 0.12), now + 0.01);
       gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.18);
       oscillator.connect(gain);
-      gain.connect(ctx.destination);
+      gain.connect(outputBus(ctx));
       oscillator.start(now);
       oscillator.stop(now + 0.2);
     } catch {
@@ -3265,9 +3476,26 @@ export function useVoiceWebSocket() {
         height: { ideal: settings.maxHeight, max: settings.maxHeight },
       } : {}),
       ...(settings?.maxFrameRate ? { frameRate: { ideal: settings.maxFrameRate, max: settings.maxFrameRate } } : {}),
+      // Chromium 专有提示：不支持的字典成员按 WebIDL 应忽略，但 WebKit
+      // 历史上会因未知成员整段拒绝，所以按内核筛选。
+      ...(capabilities.displayCaptureHints ? { displaySurface: "browser" } : {}),
+    } as MediaTrackConstraints;
+    // 只有 Chromium 会把显示音频轨交出来；其余内核传 audio:true 只会换来
+    // 一条永远不存在的音轨，不如直接不请求。
+    const wantAudio = audio && capabilities.displayAudioCapture;
+    const captureDisplay = async (): Promise<MediaStream> => {
+      try {
+        return await navigator.mediaDevices.getDisplayMedia({ video: videoConstraints, audio: wantAudio });
+      } catch (error) {
+        if (error instanceof TypeError) {
+          // 退化到最小约束再试一次：宁可不带分辨率/帧率上限，也要出画面。
+          return navigator.mediaDevices.getDisplayMedia({ video: true, audio: wantAudio });
+        }
+        throw error;
+      }
     };
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({ video: videoConstraints, audio });
+      const stream = await captureDisplay();
       if (startGeneration !== screenShareStartGeneration || !screenShareStarting.value || screenShareStartCancelled) {
         stream.getTracks().forEach((track) => track.stop());
         return;
@@ -3278,7 +3506,8 @@ export function useVoiceWebSocket() {
       // 显示采集轨默认按「文本/细节」语义编码 —— 清晰度优先，帧率第一个被牺牲。
       // 用户选了 >=30fps 说明要的是流畅（放视频/游戏），设成 motion；
       // 选低帧率通常是在共享文档/代码，保留 text 让文字更锐利。
-      if ("contentHint" in videoTrack) {
+      // WebKit 未实现 contentHint，写入会被静默忽略，所以先查能力。
+      if (capabilities.contentHint) {
         videoTrack.contentHint = (settings?.maxFrameRate ?? 30) >= 30 ? "motion" : "text";
       }
       screenShareCaptureFrameRate = settings?.maxFrameRate ?? 30;
@@ -4265,10 +4494,13 @@ export function useVoiceWebSocket() {
           await new Promise((r) => setTimeout(r, 2500));
           const anyEl = el as HTMLAudioElement & { webkitAudioDecodedByteCount?: number };
           const result = {
-            decodedBytes: anyEl.webkitAudioDecodedByteCount ?? null,
+            // webkitAudioDecodedByteCount 是 Blink/WebKit 专有；Gecko 没有等价
+            // 计数器，那边改用 RTP 统计的 totalAudioEnergy 判断"解码器有没有产出"。
+            decodedBytes: capabilities.decodedAudioByteCounter ? (anyEl.webkitAudioDecodedByteCount ?? null) : null,
             paused: el.paused,
             readyState: el.readyState,
             error: el.error ? `${el.error.code}` : null,
+            rtp: await readConsumerAudioEnergy(node.consumer, capabilities.rtcStats),
           };
           el.pause();
           el.srcObject = null;
@@ -4335,6 +4567,12 @@ export function useVoiceWebSocket() {
   return {
     ws,
     state,
+    /**
+     * 浏览器兼容性报告（内核 + 能力矩阵 + 降级清单）。UI 用它决定输出设备选择、
+     * 伴奏共享、录音自测这些可选能力要不要露出，以及该给什么提示。
+     */
+    browserSupport,
+    capabilities,
     /**
      * 刷新后可以自动回到的房间（只有真正连上过、且没有被显式离开/判死时才有）。
      * 由组件在挂载时读一次，用于自动重连。

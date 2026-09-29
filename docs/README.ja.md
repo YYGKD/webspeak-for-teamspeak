@@ -132,7 +132,9 @@ npm start
 ## ⚠️ 要件と注意
 
 - ソースからのビルドには Node.js `>=22.5` が必要です。Docker と Release には必要な実行環境が含まれます。
-- WebRTC に対応した最新の Chrome、Edge などを使用してください。マイクとウィンドウ音声には通常 HTTPS が必要です。
+- 対応ベースラインは **Chrome / Edge 94+ · Firefox 102+ · Safari 15.4+**（iOS Safari と Android Chrome を含む）です。マイクとウィンドウ音声には通常 HTTPS が必要です。ブラウザエンジンごとの差異とフォールバックは、リポジトリの README「Browser Compatibility」に記載しています。
+- 出力デバイスの選択（スピーカー切り替え）が実際に機能するのは Chromium 系のみです（`AudioContext.setSinkId`）。Firefox 116+ には `HTMLMediaElement.setSinkId` がありますが `AudioContext.setSinkId` はなく、このアプリの可聴出力は WebAudio グラフ由来のため、Firefox もシステム既定の出力にフォールバックします。設定パネルにその旨を表示します。
+- 伴奏共有は Chromium デスクトップのみで、WebRTC が必要です。Firefox/Safari の `getDisplayMedia` は表示音声トラックを返さないため、これらのエンジンでは利用できません。
 - WebSpeak のホストから TeamSpeak に到達できる必要があります。標準音声ポートは `9987` です。
 - Web サービスは `3040/TCP` を使用します。公開時は HTTPS と WebSocket をリバースプロキシ経由で公開してください。
 - WebRTC のポート範囲は既定で `40000–40099`（UDP と TCP）。全体を許可し、変更前に WebRTC を無効化してください。

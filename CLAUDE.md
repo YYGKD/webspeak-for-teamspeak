@@ -25,6 +25,7 @@ Browser ── WebSocket (JSON business + media control signaling only) ──�
 
 ```
 web/                         # Vue 3 + Vite frontend (SPA)
+  src/services/browser-support.ts       # Engine/version sniffing, capability matrix, degradation list
   src/composables/useVoiceWebSocket.ts  # WS JSON client, mic level/VOX, WebRTC + playback
   src/views/WebClient.vue               # Connect form + channel/member tree
 src/
@@ -36,6 +37,37 @@ src/
     voice-bridge.ts           # /ws/voice endpoint, JSON protocol, media signaling, WebQuery API
     ts-client.ts              # TS3Client wrapper around @echosixhiya/teamspeak-client
 ```
+
+## Browser Compatibility
+
+Support baseline: **Chrome / Edge 94+ · Firefox 102+ · Safari 15.4+** (incl. iOS Safari, Android Chrome).
+
+`web/src/services/browser-support.ts` is the **single source of truth** for browser differences: engine/version detection, the capability matrix, and the derived degradation list. `checkSupport()` returns only `report.blockingReason`; do not reintroduce ad-hoc `'webkitFoo' in window` probes elsewhere.
+
+- Only four blocking conditions: secure context, `RTCPeerConnection`, `getUserMedia`, Web Audio. Everything else degrades.
+- Chromium-only extras: display-capture hints (`displaySurface` / `selfBrowserSurface` / `systemAudio` / `windowAudio` / `restrictOwnAudio`) and display **audio** capture (accompaniment). `accompanimentSupported` must stay gated on `displayAudioCapture`, not merely on `getDisplayMedia` existing.
+- **Speaker selection is gated on `outputRoutingMode !== "none"`, so Chrome and Firefox behave identically** (same dropdown, same device list, switching takes effect immediately). The playback layer picks the mechanism from `outputRoutingMode`:
+  - `"audioContext"` (Chromium): `AudioContext.setSinkId` redirects the whole context. No added cost.
+  - `"mediaElement"` (Firefox): **lazy** element routing in `setOutputRouting()` — only once the user picks a non-default device is the audible graph rewired onto a `MediaStreamAudioDestinationNode` played by an **unmuted** `<audio>` element with `setSinkId`. With no device chosen the graph stays on `ctx.destination`, so nobody pays the extra buffering stage by default. All audible connections must go through `outputBus(ctx)` (speaker `analyserNode`s and notification oscillators do); `releaseElementOutputRouting()` rewires back and is called on transport teardown and when the AudioContext is closed.
+  - `"none"` (WebKit/Safari): shows an explanation pointing at the OS-level per-app output setting. Not a target, but handled honestly.
+  - Why the element has to be an audible sink and not just a pull driver: measured on real Firefox 153 with real speakers (WASAPI endpoint peak meters + per-endpoint session attribution) — WebAudio output follows the **browser/OS audio route**, element `setSinkId` works in both directions, but element `setSinkId` alone **cannot** redirect the WebAudio graph (tone stayed put, other endpoint read exactly 0). Routing the mix *through* an element is the only thing that works.
+  - Do not reintroduce `applySpeakerSink()`-style per-speaker element sink setting: those elements are muted pull drivers and it never affected what the user heard.
+  - Evidence, reproduction rig and the post-implementation acceptance run: `.local/browser-verify/audio-findings.md`, `AudioProbe.cs`, `sample-audio.ps1`, `audiotest2.html` (device availability), `audiotest3/4.html` (routing proof), `audiotest6.html` (create/rewire/release acceptance).
+- **Input device selection is a different story and needs no gating.** Microphone choice is a plain `getUserMedia({ deviceId: { exact } })` constraint; measured on real Firefox 153 it is honoured (the reported `deviceId` matched the request and `autoGainControl` came back as requested rather than at its `true` default). Do not extend the output-side capability gating to `#input-device` — Firefox users keep full microphone selection, and the AudioWorklet capture path also works there.
+- **`@sapphi-red/web-noise-suppressor` must stay lazily imported.** Its module top level has `class RnnoiseWorkletNode extends AudioWorkletNode {}`, so a static import throws `ReferenceError` at start-up on any engine without AudioWorklet — killing the page before the `ScriptProcessor` fallback can run (this was a real boot crash in WebKit). Keep the type-only import and the `await import()` inside `createRnnoiseNode()`.
+- `webkitAudioDecodedByteCount` is Blink/WebKit only; the Gecko equivalent is RTP `totalAudioEnergy` via `readConsumerAudioEnergy()`.
+- `displayMediaOptions()` filters the Chromium hints per engine, and both `getDisplayMedia` call sites retry once with `video: true` on a `TypeError`.
+- CSS: `color-mix()` needs Chrome 111 / Firefox 113 / Safari 16.2 — above the baseline. `WebClient.vue` ends with an `@supports not (color: color-mix(...))` fallback block for focus outlines, solid backgrounds, and muted/active states; only genuinely decorative `box-shadow` mixes are left without a fallback. `-webkit-backdrop-filter` is always written alongside the standard property. Do not use `:has()` without a class-based fallback (needs Firefox 121+). Note the fallback's `var()` references mean it must not be tested in isolation without the theme tokens.
+- `web/vite.config.ts` pins `build.target` / `build.cssTarget` to `chrome94 / edge94 / firefox102 / safari15.4`. esbuild only downlevels syntax — it does not polyfill `color-mix()`.
+- `#app { zoom: var(--ui-scale) }` needs Firefox 126+; `main.ts` pins `--ui-scale` to `1` when `CSS.supports("zoom", "1")` is false, so the layout and the `--app-vh` derivation never disagree.
+- Use the **one-argument** `CSS.supports("selector(:has(*))")` form for selector support. The two-argument form is parsed as a property/value pair and returns `false` even in engines that do support `:has()` (confirmed in Chrome, Firefox and WebKit).
+
+- **CJK control labels must carry `white-space: nowrap`.** A CJK label has a *min-content width of one character*, so a flex item holding it collapses into a vertical column as soon as it is squeezed. These controls are sized as "icon + label + padding", i.e. the label gets **exactly** its text width, so a ~1px font-metric difference flips the outcome. Measured on the real build (Chrome 154 / Firefox 155): the header's `.performance-trigger` is laid out at ~136px by both engines, but the label box gets 44.0px in Chrome vs 43.1px in Firefox while「网络性能」needs ~44px — Chrome keeps one line, Firefox wraps to two, **at every window width including 1400px**. `WebClient.vue` therefore has a grouped `white-space: nowrap` rule for compact controls, plus `.workspace-actions { flex: 0 0 auto }` so the shrink falls on `.breadcrumbs` (which ellipsizes) instead of on button text, plus `.breadcrumbs { overflow: hidden }`. When adding a new compact control, add it to that rule.
+- Keep that rule limited to classes **actually used in the template** — several older layout classes (`.nav-rail`, `.rail-button`, `.control-dock`, `.mic-mode-switch`, `.chat-tabs`' former siblings, `.quick-action`, `.settings-nav-item`, `.live-pill`, `.github-button`, …) exist only in CSS now, and listing them is misleading.
+- The layout harness is `.local/browser-verify/layout-probe.html` + `layout-compare.mjs`: it loads the **real compiled CSS**, rebuilds the live chrome with real class names and scope attributes, and sweeps each row's width in Chrome and Firefox, reporting labels that break. Two traps it already handles, both of which produced false results first time round: (1) Vue's scoped rules are `.cls[data-v-xxxx]`, so probe elements **must** carry every scope attribute or almost no app CSS applies; (2) `Element.getClientRects()` returns one rect for a block element however many lines it has (flex children get blockified), so wrap detection needs `Range.getClientRects()` — and must ignore `display: inline` boxes, whose `clientWidth` is spec-defined 0 and whose `scrollWidth` engines disagree on.
+
+### Verifying browser behaviour
+`scripts/browser-support-test.mjs` covers UA→engine/product detection (91 assertions, no browser needed, part of `npm test`). Anything platform-dependent has to be measured on real engines — a local Playwright harness for that lives outside the repo at `.local/browser-verify/` (Chromium/Firefox/WebKit, run `node server.mjs` then `node verify.mjs`). Playwright's WebKit on Windows ships without the media stack, so its `RTCPeerConnection`/`getDisplayMedia`/`MediaRecorder` readings are `false` and do **not** describe shipping Safari.
 
 ## Key Technical Details
 
@@ -96,7 +128,8 @@ Media worker binaries are vendored under `vendor/mediasoup-worker/` and verified
 - No secrets in source; config.json is gitignored
 
 ## Known Limitations
-- Browser must support WebRTC and `AudioWorklet` (current Chrome/Edge/Firefox/Safari)
+- Browser baseline: Chrome / Edge 94+, Firefox 102+, Safari 15.4+ (see Browser Compatibility above)
 - HTTPS required (self-signed cert OK, generated in `certs/`)
 - Max 32 concurrent users (TS3 license limit)
 - `tsApiKey` required for channel list; voice works without it
+- Output-device selection works on Chromium and Firefox (different mechanisms, same UX); accompaniment remains Chromium-only because Gecko exposes no display audio track

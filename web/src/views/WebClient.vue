@@ -37,6 +37,7 @@
 
           <div v-if="voiceState.error" class="notice error-notice"><span class="notice-symbol">!</span><span class="notice-content"><span>{{ localizedMessage(voiceState.error) }}</span><code v-if="voiceState.errorCode">{{ t('errorCode') }}: {{ visibleErrorCode(voiceState.errorCode) }}</code></span></div>
           <div v-if="browserError" class="notice warning-notice"><span class="notice-symbol">i</span><span>{{ localizedMessage(browserError) }}</span></div>
+          <div v-if="browserDegradations.length" class="notice warning-notice"><span class="notice-symbol">i</span><span class="notice-content"><span>{{ t('browserDegraded') }}</span><ul class="browser-degradation-list"><li v-for="item in browserDegradations" :key="item.key">{{ localizedMessage(item.message) }}</li></ul></span></div>
           <div v-if="!serverConfigLoading && !initialized" class="notice warning-notice"><span class="notice-symbol">i</span><span>{{ t('notConfigured') }} <a href="/admin">{{ t('configureNow') }}</a></span></div>
           <div v-if="!localPersistenceAvailable" class="notice warning-notice"><span class="notice-symbol">i</span><span>{{ t('localPersistenceUnavailable') }}</span></div>
 
@@ -83,7 +84,7 @@
       </main>
 
       <footer class="join-footer">
-        <span>WebSpeak</span><span class="footer-separator">·</span><span>{{ t('teamSpeakClient') }}</span><span class="footer-spacer"></span><button type="button" class="clear-local-button" @click="clearBrowserData">{{ t('clearLocalData') }}</button><span class="footer-separator">·</span><span>{{ t('browserSupport') }}</span>
+        <span>WebSpeak</span><span class="footer-separator">·</span><span>{{ t('teamSpeakClient') }}</span><span class="footer-spacer"></span><button type="button" class="clear-local-button" @click="clearBrowserData">{{ t('clearLocalData') }}</button><span class="footer-separator">·</span><span :title="browserSupportDetail">{{ t('browserSupport') }}</span>
       </footer>
 
 
@@ -180,12 +181,15 @@
                   </div>
                   <strong>{{ member.isSelf ? t('you') : member.nickname }}</strong><span>{{ isSpeaking(member) ? t('speaking') : member.isSelf ? t('connectedYou') : t('connected') }}</span>
                   <div v-if="member.isSelf || screenShareStreamForMember(member)" class="screen-share-card-actions">
-                    <template v-if="member.isSelf && !screenShareActive && !screenShareStarting">
+                    <template v-if="member.isSelf && !screenShareActive && !screenShareStarting && capabilities.getDisplayMedia">
                       <div class="screen-share-start-actions">
                         <button type="button" class="screen-share-card-button" @click.stop="startScreenShareWithSettings"><Icon name="monitor" :size="13" /> {{ t('startScreenShare') }}</button>
                         <button type="button" class="screen-share-settings-button" :aria-label="t('screenShareSettings')" :aria-expanded="screenShareSettingsOpen" :title="t('screenShareSettings')" @click.stop="screenShareSettingsOpen = !screenShareSettingsOpen"><Icon name="settings" :size="13" /></button>
                       </div>
                     </template>
+                    <!-- iOS Safari has no getDisplayMedia: state the limitation instead of
+                         offering a button whose only outcome is an error after the click. -->
+                    <span v-else-if="member.isSelf && !screenShareActive && !screenShareStarting" class="screen-share-unsupported">{{ t('screenShareUnsupported') }}</span>
                     <button v-else-if="!member.isSelf" type="button" :class="['screen-share-card-button', { viewing: screenShareViewingStreamId === screenShareStreamForMember(member)?.streamId }]" @click.stop="toggleScreenShareForMember(member)"><Icon name="monitor" :size="13" /> {{ screenShareViewingStreamId === screenShareStreamForMember(member)?.streamId ? t('watching') : t('watchScreenShare') }}</button>
                   </div>
                 </article>
@@ -462,6 +466,8 @@ const {
   joinScreenShare,
   leaveScreenShare,
   checkSupport,
+  browserSupport,
+  capabilities,
   clearError,
   measureLatency,
   sampleMediaPath,
@@ -498,6 +504,24 @@ const accelerationRelays = ref<Array<{ id: string; name: string }>>([]);
 const accelerationRelayId = ref("");
 const accelerationAvailable = computed(() => accelerationRelays.value.length > 0);
 const browserError = ref("");
+/**
+ * 兼容性降级提示（Firefox / Safari 上会命中几条）。
+ *
+ * 只挑「影响核心语音体验」的几项展示：输出设备选择在设置面板里已经有专门说明，
+ * 伴奏共享又是个小众功能，全部铺在入会卡片上只会变成噪音。
+ */
+const browserDegradations = computed(() => browserSupport.value.degradations.filter((item) =>
+  item.key === "audioWorklet" || item.key === "mediaRecorder" || item.key === "getDisplayMedia"));
+/** 页脚兼容矩阵的悬停详情：实际识别到的内核 + 完整降级清单。 */
+const browserSupportDetail = computed(() => {
+  // 页脚只显示浏览器名；精确的最低版本与本次检测结果都放在这个悬停提示里。
+  const lines = [
+    t('browserSupportFloor'),
+    `${t('detectedBrowser')}: ${browserSupport.value.identity.label}`,
+  ];
+  for (const item of browserSupport.value.degradations) lines.push(`· ${localizedMessage(item.message)}`);
+  return lines.join("\n");
+});
 const serverConfigLoading = ref(true);
 const memberQuery = ref("");
 const messageDraft = ref("");
@@ -645,8 +669,12 @@ const translations: Record<string, Record<string, string>> = {
     connecting: "正在连接…",
     enterVoice: "进入语音空间",
     connectionAuthorized: "连接信息仅用于本次语音会话",
-    browserSupport: "Chrome / Edge 94+",
-    teamSpeakClient: "TeamSpeak 浏览器客户端",
+    browserSupport: "Chrome · Edge · Firefox · Safari",
+    /* 页脚只放「哪些浏览器可用」，精确的最低版本移到悬停提示里：版本矩阵会把窄
+       宽度下的换行阈值从 360px 推到 500px（实测，两个内核一致）。 */
+    browserSupportFloor: "支持版本：Chrome / Edge 94+ · Firefox 102+ · Safari 15.4+",
+    detectedBrowser: "检测到的浏览器",
+    browserDegraded: "当前浏览器以下功能受限",
     home: "首页",
     activity: "动态",
     server: "服务器",
@@ -671,6 +699,7 @@ const translations: Record<string, Record<string, string>> = {
     accompanimentNoAudio: "所选来源没有可共享音频，请重新选择并勾选共享音频",
     accompanimentPermissionDenied: "无法获取伴奏音频，请允许屏幕共享并勾选共享音频",
     accompanimentUnsupported: "当前浏览器不支持伴奏共享",
+    screenShareUnsupported: "当前浏览器不支持屏幕共享",
     screenShare: "屏幕共享",
     screenShareTitle: "屏幕共享",
     startScreenShare: "共享屏幕",
@@ -856,7 +885,7 @@ const translations: Record<string, Record<string, string>> = {
     speakers: "扬声器 / 耳机",
     defaultOutput: "默认浏览器输出",
     outputVolume: "输出音量",
-    outputDeviceUnsupported: "当前浏览器不支持扬声器设备选择，将使用默认输出设备。",
+    outputDeviceUnsupported: "当前浏览器无法在页面内切换扬声器：输出跟随系统音频设置。可在系统音量合成器中为浏览器单独指定输出设备。",
     notificationVolume: "通知音量",
     audioStatus: "音频状态",
     audioReady: "音频已就绪",
@@ -980,7 +1009,10 @@ const translations: Record<string, Record<string, string>> = {
     connecting: "Connecting…",
     enterVoice: "Enter voice space",
     connectionAuthorized: "Connection details are used only for this voice session",
-    browserSupport: "Chrome / Edge 94+",
+    browserSupport: "Chrome · Edge · Firefox · Safari",
+    browserSupportFloor: "Supported: Chrome / Edge 94+ · Firefox 102+ · Safari 15.4+",
+    detectedBrowser: "Detected browser",
+    browserDegraded: "This browser has limited support for:",
     teamSpeakClient: "TeamSpeak browser client",
     home: "Home",
     activity: "Activity",
@@ -1006,6 +1038,7 @@ const translations: Record<string, Record<string, string>> = {
     accompanimentNoAudio: "The selected source has no shareable audio. Select it again and enable audio sharing",
     accompanimentPermissionDenied: "Could not access accompaniment audio. Allow screen sharing and enable audio sharing",
     accompanimentUnsupported: "This browser does not support accompaniment sharing",
+    screenShareUnsupported: "This browser does not support screen sharing",
     screenShare: "Screen sharing",
     screenShareTitle: "Screen sharing",
     startScreenShare: "Share screen",
@@ -1191,7 +1224,7 @@ const translations: Record<string, Record<string, string>> = {
     speakers: "Speakers / headphones",
     defaultOutput: "Default browser output",
     outputVolume: "Output volume",
-    outputDeviceUnsupported: "Output device selection is not supported by this browser. Using the default output device.",
+    outputDeviceUnsupported: "This browser cannot switch speakers from the page: output follows the system audio setting. You can assign a device to the browser in the system volume mixer.",
     notificationVolume: "Notification volume",
     audioStatus: "Audio status",
     audioReady: "Audio ready",
@@ -1318,7 +1351,10 @@ translations.de = {
   connecting: "Verbindung wird hergestellt…",
   enterVoice: "Sprachbereich betreten",
   connectionAuthorized: "Verbindungsdaten werden nur für diese Sprachsitzung verwendet",
-  browserSupport: "Chrome / Edge 94+",
+  browserSupport: "Chrome · Edge · Firefox · Safari",
+  browserSupportFloor: "Unterstützt: Chrome / Edge 94+ · Firefox 102+ · Safari 15.4+",
+  detectedBrowser: "Erkannter Browser",
+  browserDegraded: "Dieser Browser unterstützt nur eingeschränkt:",
   teamSpeakClient: "TeamSpeak-Browserclient",
   home: "Startseite",
   activity: "Aktivität",
@@ -1344,6 +1380,7 @@ translations.de = {
   accompanimentNoAudio: "Die ausgewählte Quelle enthält kein teilbares Audio. Wähle sie erneut und aktiviere die Audiofreigabe.",
   accompanimentPermissionDenied: "Begleitungs-Audio konnte nicht abgerufen werden. Erlaube die Bildschirmfreigabe und aktiviere die Audiofreigabe.",
   accompanimentUnsupported: "Dieser Browser unterstützt das Teilen von Begleitung nicht.",
+  screenShareUnsupported: "Dieser Browser unterstützt kein Bildschirmteilen",
   startScreenShare: "Bildschirm teilen",
   screenShareStarting: "Live-Stream wird gestartet",
   stopScreenShare: "Freigabe beenden",
@@ -1521,7 +1558,7 @@ translations.de = {
   speakers: "Lautsprecher / Kopfhörer",
   defaultOutput: "Standardausgabe des Browsers",
   outputVolume: "Ausgabelautstärke",
-  outputDeviceUnsupported: "Dieser Browser unterstützt keine Auswahl des Ausgabegeräts. Die Standardausgabe wird verwendet.",
+  outputDeviceUnsupported: "Dieser Browser kann die Lautsprecher nicht aus der Seite heraus wechseln: Die Ausgabe folgt der System-Audioeinstellung. Im System-Lautstärkemixer lässt sich dem Browser ein Gerät zuweisen.",
   notificationVolume: "Benachrichtigungslautstärke",
   audioStatus: "Audiostatus",
   audioReady: "Audio bereit",
@@ -1644,6 +1681,9 @@ translations.ru = {
   screenShareResolution1080p: "1080p (до 1920 × 1080)",
   screenShareFrameRate: "Ограничение FPS",
   screenShareSettingsNote: "Настройки применятся при следующем запуске трансляции",
+  screenShareUnsupported: "Этот браузер не поддерживает демонстрацию экрана",
+  browserSupportFloor: "Поддерживаются: Chrome / Edge 94+ · Firefox 102+ · Safari 15.4+",
+  outputDeviceUnsupported: "Этот браузер не может переключать динамики со страницы: вывод следует системной настройке звука. Назначить устройство браузеру можно в системном микшеере громкости.",
   noiseSuppression: "Шумоподавление",
   noiseSuppressionHint: "Обработка звука при захвате в браузере",
   highQuality: "Качественный звук",
@@ -1769,6 +1809,9 @@ translations.ja = {
   screenShareResolution1080p: "1080p（最大 1920 × 1080）",
   screenShareFrameRate: "フレームレート上限",
   screenShareSettingsNote: "次回の共有開始時に適用されます",
+  screenShareUnsupported: "このブラウザは画面共有に対応していません",
+  browserSupportFloor: "対応: Chrome / Edge 94+ · Firefox 102+ · Safari 15.4+",
+  outputDeviceUnsupported: "このブラウザはページ内でスピーカーを切り替えられません。出力はシステムの音声設定に従います。システムの音量ミキサーでブラウザにデバイスを割り当ててください。",
   noiseSuppression: "ノイズ抑制",
   noiseSuppressionHint: "ブラウザ側で音声を処理",
   highQuality: "高品質な音声",
@@ -1981,6 +2024,12 @@ function localizedMessage(message: string) {
     "管理员已结束你的语音会话": "An administrator ended your voice session",
     "语音网关正在重启，请稍后重新进入语音空间": "The voice gateway is restarting. Enter the voice space again shortly",
     "与语音网关的连接已失去响应，请重新进入语音空间": "The voice gateway stopped responding. Enter the voice space again",
+    "当前浏览器不支持 WebRTC 实时语音，请更换最新版 Chrome、Edge、Firefox 或 Safari": "This browser does not support WebRTC realtime voice. Use a current version of Chrome, Edge, Firefox, or Safari",
+    "当前浏览器无法在页面内切换扬声器，输出跟随系统音频设置（可在系统音量合成器中为浏览器单独指定输出设备）": "This browser cannot switch speakers from the page; output follows the system audio setting (you can assign a device to the browser in the system volume mixer)",
+    "当前浏览器不支持 AudioWorklet，已切换到兼容采集模式（延迟略高）": "This browser does not support AudioWorklet, so the compatibility capture path is in use (slightly higher latency)",
+    "当前浏览器不支持本地录音回放，麦克风自测将只显示实时电平": "This browser cannot record locally, so the microphone test only shows the live level",
+    "当前浏览器不支持采集显示音频，伴奏共享不可用": "This browser cannot capture display audio, so accompaniment sharing is unavailable",
+    "当前浏览器不支持屏幕共享": "This browser does not support screen sharing",
   };
   if (language.value === "en" && exact[message]) return exact[message];
   if (message.startsWith("麦克风访问失败：")) {
@@ -2075,6 +2124,12 @@ function localizedMessage(message: string) {
       "管理员已结束你的语音会话": "Ein Administrator hat deine Sprachsitzung beendet",
       "语音网关正在重启，请稍后重新进入语音空间": "Das Sprach-Gateway wird neu gestartet. Tritt dem Sprachraum gleich erneut bei",
       "与语音网关的连接已失去响应，请重新进入语音空间": "Die Verbindung zum Sprach-Gateway antwortet nicht mehr. Tritt dem Sprachraum erneut bei",
+      "当前浏览器不支持 WebRTC 实时语音，请更换最新版 Chrome、Edge、Firefox 或 Safari": "Dieser Browser unterstützt keine Echtzeitstimme über WebRTC. Nutze eine aktuelle Version von Chrome, Edge, Firefox oder Safari",
+      "当前浏览器无法在页面内切换扬声器，输出跟随系统音频设置（可在系统音量合成器中为浏览器单独指定输出设备）": "Dieser Browser kann die Lautsprecher nicht aus der Seite heraus wechseln; die Ausgabe folgt der System-Audioeinstellung (im System-Lautstärkemixer lässt sich dem Browser ein Gerät zuweisen)",
+      "当前浏览器不支持 AudioWorklet，已切换到兼容采集模式（延迟略高）": "Dieser Browser unterstützt kein AudioWorklet; der Kompatibilitätsmodus für die Aufnahme ist aktiv (etwas höhere Latenz)",
+      "当前浏览器不支持本地录音回放，麦克风自测将只显示实时电平": "Dieser Browser kann nicht lokal aufnehmen; der Mikrofontest zeigt nur den Live-Pegel",
+      "当前浏览器不支持采集显示音频，伴奏共享不可用": "Dieser Browser kann keinen Bildschirmton aufnehmen; Begleitung teilen ist nicht verfügbar",
+      "当前浏览器不支持屏幕共享": "Dieser Browser unterstützt kein Bildschirmteilen",
     };
     if (german[message]) return german[message];
     if (message.startsWith("麦克风访问失败：")) return `Mikrofonzugriff fehlgeschlagen: ${message.slice(8)}`;
@@ -2131,6 +2186,12 @@ function localizedAudioNotice(code: string, message: string) {
       de: "Der Audiopfad konnte nicht wiederhergestellt werden und das Mikrofon ist nicht zurückgekehrt. Prüfe Gerät und Browserberechtigungen",
       ru: "Не удалось восстановить аудиотракт, микрофон не вернулся. Проверьте устройство и разрешения браузера",
       ja: "音声経路を再構築できず、マイクが復帰しませんでした。デバイスとブラウザの権限を確認してください",
+    },
+    RECORDER_UNAVAILABLE: {
+      en: "This browser cannot record locally, so the microphone test only shows the live level",
+      de: "Dieser Browser kann nicht lokal aufnehmen; der Mikrofontest zeigt nur den Live-Pegel",
+      ru: "Этот браузер не умеет записывать локально, поэтому тест микрофона покажет только текущий уровень",
+      ja: "このブラウザはローカル録音に対応していないため、マイクテストは現在のレベルのみ表示します",
     },
   };
   const locale = language.value === "de" ? "de" : language.value === "ru" ? "ru" : language.value === "ja" ? "ja" : "en";
@@ -3478,12 +3539,15 @@ function stopWhisperTalk(): void {
 .visitor-count-icon { position: relative; z-index: 1; display: grid; place-items: center; width: 27px; height: 27px; flex: 0 0 auto; color: #fff; border-radius: 50%; background: linear-gradient(135deg, #006a64, #32cdb7); box-shadow: 0 0 0 4px rgba(55, 205, 182, .12), 0 0 18px rgba(55, 205, 182, .24); }
 .visitor-count-label { position: relative; z-index: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .visitor-count-spark { position: relative; z-index: 1; color: #35bea7; font-size: 15px; line-height: 1; animation: visitor-spark 2.1s ease-in-out infinite; }
-.join-card { padding: 30px; border: 1px solid rgba(214, 226, 223, .8); border-radius: 20px; background: rgba(255, 255, 255, .86); box-shadow: 0 20px 52px rgba(35, 68, 63, .08); backdrop-filter: blur(12px); }
+.join-card { padding: 30px; border: 1px solid rgba(214, 226, 223, .8); border-radius: 20px; background: rgba(255, 255, 255, .86); box-shadow: 0 20px 52px rgba(35, 68, 63, .08); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); }
 .card-kicker, .section-kicker { color: #79918c; font-size: 10px; font-weight: 700; letter-spacing: .16em; }
 .join-card h2 { margin: 10px 0 7px; color: #1b2825; font-size: 27px; letter-spacing: -.045em; }
 .card-lead { margin: 0 0 7px; color: #7b8885; font-size: 13px; }
 .notice { display: flex; align-items: flex-start; gap: 10px; min-width: 0; margin: 0 0 10px; padding: 9px 10px; border-radius: 10px; font-size: 12px; line-height: 1.45; }
 .notice-content { min-width: 0; overflow-wrap: anywhere; }
+/* 兼容性降级清单：只在当前内核确有缺失时出现，逐条列出受限功能。 */
+.browser-degradation-list { margin: 5px 0 0; padding-left: 15px; list-style: disc; }
+.browser-degradation-list li { margin-top: 2px; line-height: 1.4; }
 .notice-content code { display: block; max-width: 100%; margin-top: 3px; overflow: hidden; color: currentColor; font-family: ui-monospace,SFMono-Regular,Consolas,monospace; font-size: 10px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; opacity: .78; }
 .error-notice { color: #a53c38; background: #fff0ef; border: 1px solid #f7d4d1; }
 .warning-notice { color: #8a6537; background: #fff8e9; border: 1px solid #f2dfb3; }
@@ -3545,7 +3609,7 @@ function stopWhisperTalk(): void {
 .member-flags { display: inline-flex; align-items: center; gap: 4px; }
 .member-flags span { display: inline-flex; }.member-avatar { position: relative; display: grid; place-items: center; width: 33px; height: 33px; flex: 0 0 auto; color: #fff; border-radius: 10px; font-size: 10px; font-weight: 700; }.member-avatar.speaking { box-shadow: 0 0 0 2px #90f691, 0 0 10px rgba(144,246,145,.35); }.member-presence { position: absolute; right: -2px; bottom: -2px; width: 9px; height: 9px; border: 2px solid #fbfcfc; border-radius: 50%; background: #65d879; }.member-copy { min-width: 0; flex: 1; }.member-copy strong, .member-copy span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.member-copy strong { color: #34423d; font-size: 10px; }.member-copy span { margin-top: 4px; color: #96a29e; font-size: 9px; }.member-volume { display: flex; align-items: center; gap: 5px; color: #a1afaa; width: 64px; }.member-volume input { width: 45px; height: 4px; appearance: none; border-radius: 99px; outline: none; cursor: pointer; }.member-volume input::-webkit-slider-thumb, .settings-range::-webkit-slider-thumb { width: 14px; height: 14px; appearance: none; border: 2px solid #81d8d0; border-radius: 50%; background: #fff; box-shadow: 0 2px 4px rgba(0,0,0,.12); cursor: pointer; }.member-volume input::-moz-range-thumb, .settings-range::-moz-range-thumb { width: 14px; height: 14px; border: 2px solid #81d8d0; border-radius: 50%; background: #fff; box-shadow: 0 2px 4px rgba(0,0,0,.12); cursor: pointer; }.member-empty { margin-top: 22px; color: #98a49f; font-size: 10px; text-align: center; }.member-panel-tip { display: flex; gap: 8px; margin-top: 36px; padding: 12px; color: #72827c; background: #eef5f2; border-radius: 9px; font-size: 9px; line-height: 1.5; }.member-panel-tip .ui-icon { color: #5e9e96; }
 
-.modal-backdrop { position: fixed; z-index: 20; inset: 0; display: grid; place-items: center; padding: 28px; background: rgba(25, 33, 31, .42); backdrop-filter: blur(5px); }.settings-modal { display: flex; width: min(920px, 100%); max-height: min(760px, calc(var(--app-vh) - 56px)); overflow: hidden; border-radius: 16px; background: #fff; box-shadow: 0 20px 60px rgba(16,40,35,.2); }.settings-nav { display: flex; flex-direction: column; width: 215px; flex: 0 0 auto; padding: 28px 12px 20px; background: #f8faf9; border-right: 1px solid #e6ecea; }.settings-title { padding: 0 13px 20px; color: #25322e; font-size: 19px; font-weight: 700; }.settings-nav-item { display: flex; align-items: center; gap: 12px; padding: 11px 13px; color: #65736f; background: transparent; border-left: 3px solid transparent; border-radius: 8px; font-size: 11px; text-align: left; cursor: pointer; }.settings-nav-item.active { color: #006a64; background: #e2efec; border-left-color: #006a64; font-weight: 700; }.settings-version { margin-top: auto; padding: 20px 13px 0; color: #98a5a0; border-top: 1px solid #e4ebe8; font-size: 10px; line-height: 1.7; }.settings-version span { color: #b0bbb7; }.settings-main { display: flex; min-width: 0; flex: 1; flex-direction: column; }.settings-header { display: flex; align-items: center; justify-content: space-between; min-height: 75px; padding: 0 28px; border-bottom: 1px solid #edf1ef; }.settings-header h2 { margin: 0; color: #202c29; font-size: 22px; letter-spacing: -.045em; }.settings-content { flex: 1; overflow-y: auto; padding: 28px 40px; }.settings-section { max-width: 620px; margin: 0 auto; }.settings-section h3 { display: flex; align-items: center; gap: 9px; margin: 0 0 21px; color: #293631; font-size: 16px; }.settings-section h3 .ui-icon { color: #006a64; }.settings-label { display: block; margin-bottom: 8px; color: #5e6d67; font-size: 10px; font-weight: 500; }.select-like { display: flex; align-items: center; justify-content: space-between; min-height: 39px; margin-bottom: 19px; padding: 0 13px; color: #394742; background: #f4f7f6; border-radius: 8px; font-size: 11px; }.select-like .ui-icon { color: #677671; }.settings-range-row { display: flex; align-items: center; justify-content: space-between; }.settings-range-row .settings-label { margin: 0; }.settings-range-row strong { color: #006a64; font-size: 10px; }.settings-range { width: 100%; height: 6px; margin: 11px 0 20px; appearance: none; border-radius: 999px; outline: none; cursor: pointer; }.settings-range::-webkit-slider-thumb { width: 19px; height: 19px; }.settings-range::-moz-range-thumb { width: 19px; height: 19px; }.mic-test { padding: 15px; border: 1px solid #e5ece9; border-radius: 11px; background: #fafcfb; }.mic-test-header { display: flex; align-items: center; justify-content: space-between; }.mic-test-header strong { color: #36453f; font-size: 11px; }.mic-test-header button { padding: 6px 9px; color: #006a64; background: #e0f1ee; border-radius: 5px; font-size: 10px; cursor: pointer; }.meter { display: flex; align-items: flex-end; justify-content: space-between; gap: 4px; height: 39px; margin-top: 12px; padding: 0 4px 4px; border-bottom: 1px solid #dce6e2; }.meter i { width: 5px; min-height: 4px; border-radius: 3px 3px 0 0; background: #dfe6e3; }.meter i.active { background: #81ed8b; box-shadow: 0 0 7px rgba(129,237,139,.45); animation: meter 1s ease-in-out infinite alternate; }.meter-labels { display: flex; justify-content: space-between; margin-top: 6px; color: #9ba6a2; font-size: 8px; }.settings-separator { max-width: 620px; margin: 32px auto; border-top: 1px solid #edf1ef; }.mode-note { display: flex; align-items: flex-start; gap: 8px; padding: 12px; color: #66817a; background: #eef7f4; border-radius: 8px; font-size: 10px; line-height: 1.5; }.mode-note .ui-icon { color: #4f9c91; }.settings-footer { display: flex; justify-content: flex-end; gap: 16px; min-height: 67px; padding: 15px 28px; border-top: 1px solid #edf1ef; }.text-button { padding: 0 6px; color: #63716c; background: transparent; font-size: 11px; font-weight: 600; cursor: pointer; }.save-button { padding: 0 23px; }.qq-modal-card { position: relative; width: min(460px, 100%); max-height: min(90dvh, 720px); overflow-y: auto; padding: 30px; color: #263431; border: 1px solid #d9e7e3; border-radius: 20px; background: #fff; box-shadow: 0 20px 60px rgba(16,40,35,.22); text-align: center; }.qq-modal-heading { padding: 0 24px 18px; }.qq-modal-heading h2 { margin: 8px 0 0; color: #1d2d29; font-size: 25px; letter-spacing: -.04em; }.qq-modal-close { position: absolute; top: 13px; right: 13px; display: grid; place-items: center; width: 34px; height: 34px; padding: 0; color: #6d7d78; background: #f1f6f4; border: 1px solid #e1ebe8; border-radius: 50%; cursor: pointer; }.qq-modal-close:hover { color: #006a64; background: #e2f2ef; border-color: #c8e6e1; }.qq-qr-image { display: block; width: min(100%, 360px); max-height: min(55vh, 520px); margin: 0 auto; object-fit: contain; border-radius: 12px; }.qq-direct-join { margin: 18px 0 9px; color: #667773; font-size: 13px; }.qq-join-link { display: block; padding: 11px 14px; color: #006a64; background: #edf8f5; border: 1px solid #cfe9e4; border-radius: 10px; font-size: 12px; font-weight: 700; line-height: 1.45; text-decoration: none; overflow-wrap: anywhere; }.qq-join-link:hover { color: #fff; background: #006a64; border-color: #006a64; }.toast { position: fixed; z-index: 30; right: 24px; bottom: 24px; display: flex; align-items: center; gap: 8px; padding: 11px 15px; color: #fff; background: #263e39; border-radius: 9px; box-shadow: 0 10px 24px rgba(16,48,42,.2); font-size: 11px; animation: toast-in .25s ease-out; }
+.modal-backdrop { position: fixed; z-index: 20; inset: 0; display: grid; place-items: center; padding: 28px; background: rgba(25, 33, 31, .42); -webkit-backdrop-filter: blur(5px); backdrop-filter: blur(5px); }.settings-modal { display: flex; width: min(920px, 100%); max-height: min(760px, calc(var(--app-vh) - 56px)); overflow: hidden; border-radius: 16px; background: #fff; box-shadow: 0 20px 60px rgba(16,40,35,.2); }.settings-nav { display: flex; flex-direction: column; width: 215px; flex: 0 0 auto; padding: 28px 12px 20px; background: #f8faf9; border-right: 1px solid #e6ecea; }.settings-title { padding: 0 13px 20px; color: #25322e; font-size: 19px; font-weight: 700; }.settings-nav-item { display: flex; align-items: center; gap: 12px; padding: 11px 13px; color: #65736f; background: transparent; border-left: 3px solid transparent; border-radius: 8px; font-size: 11px; text-align: left; cursor: pointer; }.settings-nav-item.active { color: #006a64; background: #e2efec; border-left-color: #006a64; font-weight: 700; }.settings-version { margin-top: auto; padding: 20px 13px 0; color: #98a5a0; border-top: 1px solid #e4ebe8; font-size: 10px; line-height: 1.7; }.settings-version span { color: #b0bbb7; }.settings-main { display: flex; min-width: 0; flex: 1; flex-direction: column; }.settings-header { display: flex; align-items: center; justify-content: space-between; min-height: 75px; padding: 0 28px; border-bottom: 1px solid #edf1ef; }.settings-header h2 { margin: 0; color: #202c29; font-size: 22px; letter-spacing: -.045em; }.settings-content { flex: 1; overflow-y: auto; padding: 28px 40px; }.settings-section { max-width: 620px; margin: 0 auto; }.settings-section h3 { display: flex; align-items: center; gap: 9px; margin: 0 0 21px; color: #293631; font-size: 16px; }.settings-section h3 .ui-icon { color: #006a64; }.settings-label { display: block; margin-bottom: 8px; color: #5e6d67; font-size: 10px; font-weight: 500; }.select-like { display: flex; align-items: center; justify-content: space-between; min-height: 39px; margin-bottom: 19px; padding: 0 13px; color: #394742; background: #f4f7f6; border-radius: 8px; font-size: 11px; }.select-like .ui-icon { color: #677671; }.settings-range-row { display: flex; align-items: center; justify-content: space-between; }.settings-range-row .settings-label { margin: 0; }.settings-range-row strong { color: #006a64; font-size: 10px; }.settings-range { width: 100%; height: 6px; margin: 11px 0 20px; appearance: none; border-radius: 999px; outline: none; cursor: pointer; }.settings-range::-webkit-slider-thumb { width: 19px; height: 19px; }.settings-range::-moz-range-thumb { width: 19px; height: 19px; }.mic-test { padding: 15px; border: 1px solid #e5ece9; border-radius: 11px; background: #fafcfb; }.mic-test-header { display: flex; align-items: center; justify-content: space-between; }.mic-test-header strong { color: #36453f; font-size: 11px; }.mic-test-header button { padding: 6px 9px; color: #006a64; background: #e0f1ee; border-radius: 5px; font-size: 10px; cursor: pointer; }.meter { display: flex; align-items: flex-end; justify-content: space-between; gap: 4px; height: 39px; margin-top: 12px; padding: 0 4px 4px; border-bottom: 1px solid #dce6e2; }.meter i { width: 5px; min-height: 4px; border-radius: 3px 3px 0 0; background: #dfe6e3; }.meter i.active { background: #81ed8b; box-shadow: 0 0 7px rgba(129,237,139,.45); animation: meter 1s ease-in-out infinite alternate; }.meter-labels { display: flex; justify-content: space-between; margin-top: 6px; color: #9ba6a2; font-size: 8px; }.settings-separator { max-width: 620px; margin: 32px auto; border-top: 1px solid #edf1ef; }.mode-note { display: flex; align-items: flex-start; gap: 8px; padding: 12px; color: #66817a; background: #eef7f4; border-radius: 8px; font-size: 10px; line-height: 1.5; }.mode-note .ui-icon { color: #4f9c91; }.settings-footer { display: flex; justify-content: flex-end; gap: 16px; min-height: 67px; padding: 15px 28px; border-top: 1px solid #edf1ef; }.text-button { padding: 0 6px; color: #63716c; background: transparent; font-size: 11px; font-weight: 600; cursor: pointer; }.save-button { padding: 0 23px; }.qq-modal-card { position: relative; width: min(460px, 100%); max-height: min(90dvh, 720px); overflow-y: auto; padding: 30px; color: #263431; border: 1px solid #d9e7e3; border-radius: 20px; background: #fff; box-shadow: 0 20px 60px rgba(16,40,35,.22); text-align: center; }.qq-modal-heading { padding: 0 24px 18px; }.qq-modal-heading h2 { margin: 8px 0 0; color: #1d2d29; font-size: 25px; letter-spacing: -.04em; }.qq-modal-close { position: absolute; top: 13px; right: 13px; display: grid; place-items: center; width: 34px; height: 34px; padding: 0; color: #6d7d78; background: #f1f6f4; border: 1px solid #e1ebe8; border-radius: 50%; cursor: pointer; }.qq-modal-close:hover { color: #006a64; background: #e2f2ef; border-color: #c8e6e1; }.qq-qr-image { display: block; width: min(100%, 360px); max-height: min(55vh, 520px); margin: 0 auto; object-fit: contain; border-radius: 12px; }.qq-direct-join { margin: 18px 0 9px; color: #667773; font-size: 13px; }.qq-join-link { display: block; padding: 11px 14px; color: #006a64; background: #edf8f5; border: 1px solid #cfe9e4; border-radius: 10px; font-size: 12px; font-weight: 700; line-height: 1.45; text-decoration: none; overflow-wrap: anywhere; }.qq-join-link:hover { color: #fff; background: #006a64; border-color: #006a64; }.toast { position: fixed; z-index: 30; right: 24px; bottom: 24px; display: flex; align-items: center; gap: 8px; padding: 11px 15px; color: #fff; background: #263e39; border-radius: 9px; box-shadow: 0 10px 24px rgba(16,48,42,.2); font-size: 11px; animation: toast-in .25s ease-out; }
 
 .channel-password-modal { position: relative; width: min(420px, 100%); padding: 31px 32px 28px; color: #263431; border: 1px solid #d9e7e3; border-radius: 18px; background: #fff; box-shadow: 0 20px 60px rgba(16,40,35,.22); }
 .channel-password-icon { display: grid; place-items: center; width: 48px; height: 48px; margin-bottom: 17px; color: #006a64; background: #e4f4f0; border-radius: 14px; }
@@ -3976,7 +4040,7 @@ function stopWhisperTalk(): void {
   .mobile-more-panel button { display: flex; align-items: center; gap: 10px; min-height: 46px; padding: 0 12px; color: var(--text-primary); background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px; text-align: left; cursor: pointer; }
   .mobile-more-panel button:hover { color: var(--accent); border-color: var(--accent); }
   .mobile-more-panel button.danger { color: var(--danger); }
-  .mobile-nav { position: fixed; z-index: 30; right: 0; bottom: 0; left: 0; display: grid; grid-template-columns: repeat(4, 1fr); gap: 2px; min-height: 68px; padding: 6px 8px calc(6px + env(safe-area-inset-bottom, 0px)); background: color-mix(in srgb, var(--surface-1) 94%, transparent); border-top: 1px solid var(--border); box-shadow: 0 -7px 20px color-mix(in srgb, var(--text-primary) 8%, transparent); backdrop-filter: blur(14px); }
+  .mobile-nav { position: fixed; z-index: 30; right: 0; bottom: 0; left: 0; display: grid; grid-template-columns: repeat(4, 1fr); gap: 2px; min-height: 68px; padding: 6px 8px calc(6px + env(safe-area-inset-bottom, 0px)); background: color-mix(in srgb, var(--surface-1) 94%, transparent); border-top: 1px solid var(--border); box-shadow: 0 -7px 20px color-mix(in srgb, var(--text-primary) 8%, transparent); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); }
   .mobile-nav button { display: grid; place-items: center; gap: 3px; min-width: 0; color: var(--text-muted); background: transparent; border-radius: 8px; font-size: 11px; cursor: pointer; }
   .mobile-nav button.active { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); font-weight: 700; }
   .mobile-nav button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -4043,7 +4107,7 @@ function stopWhisperTalk(): void {
   .app-shell { height: var(--app-vh); height: var(--app-svh); min-height: var(--app-vh); min-height: var(--app-svh); max-height: var(--app-vh); max-height: var(--app-svh); padding-bottom: calc(74px + env(safe-area-inset-bottom, 0px)); overflow: hidden; }
   .app-shell .workspace { height: calc(var(--app-vh) - 74px - env(safe-area-inset-bottom, 0px)); height: calc(var(--app-svh) - 74px - env(safe-area-inset-bottom, 0px)); min-height: 0; max-height: calc(var(--app-vh) - 74px - env(safe-area-inset-bottom, 0px)); max-height: calc(var(--app-svh) - 74px - env(safe-area-inset-bottom, 0px)); overflow: hidden; }
   .app-shell .workspace-scroll { height: 100%; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }
-  .workspace-header { min-height: calc(60px + env(safe-area-inset-top, 0px)); padding: env(safe-area-inset-top, 0px) 14px 0; box-sizing: border-box; position: sticky; top: 0; z-index: 6; background: color-mix(in srgb, var(--surface-1) 94%, transparent); backdrop-filter: blur(14px); }
+  .workspace-header { min-height: calc(60px + env(safe-area-inset-top, 0px)); padding: env(safe-area-inset-top, 0px) 14px 0; box-sizing: border-box; position: sticky; top: 0; z-index: 6; background: color-mix(in srgb, var(--surface-1) 94%, transparent); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px); }
   .breadcrumbs { flex: 1 1 auto; min-width: 0; gap: 6px; font-size: 13px; }
   .breadcrumbs .crumb-muted, .breadcrumbs > .ui-icon { display: none; }
   .mobile-brand { display: inline; font-size: 18px; }
@@ -4120,7 +4184,7 @@ function stopWhisperTalk(): void {
   .mobile-nav { min-height: 74px; padding: 8px 8px calc(8px + env(safe-area-inset-bottom, 0px)); }
   .mobile-nav button { min-height: 52px; font-size: 12px; }
 
-  .member-menu-backdrop { position: fixed; z-index: 39; inset: 0; display: block; background: rgba(13, 29, 26, .38); backdrop-filter: blur(2px); }
+  .member-menu-backdrop { position: fixed; z-index: 39; inset: 0; display: block; background: rgba(13, 29, 26, .38); -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px); }
   .member-context-menu { z-index: 40; left: 10px !important; right: 10px; top: auto !important; bottom: calc(74px + env(safe-area-inset-bottom, 0px)) !important; min-width: 0; max-height: calc(var(--app-svh) - 100px); padding: 12px; border-radius: 18px; box-shadow: 0 18px 42px rgba(13, 38, 33, .25); }
   .member-menu-header strong { padding: 4px 8px 11px; font-size: 16px; }
   .member-menu-close { display: grid; place-items: center; width: 36px; height: 36px; flex: 0 0 36px; padding: 0 !important; color: var(--text-muted); background: var(--surface-2); border-radius: 10px; }
@@ -4486,6 +4550,8 @@ function stopWhisperTalk(): void {
 .screen-share-start-actions { display: inline-flex; align-items: stretch; justify-content: center; gap: 4px; width: 100%; min-width: 0; }
 .screen-share-card-button { display: inline-flex; align-items: center; justify-content: center; gap: 4px; min-width: 0; min-height: 25px; max-width: 100%; padding: 4px 7px; overflow: hidden; color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--border)); border-radius: 999px; background: color-mix(in srgb, var(--accent) 8%, var(--surface-1)); font-size: 9px; font-weight: 700; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .screen-share-card-button:hover { background: color-mix(in srgb, var(--accent) 15%, var(--surface-1)); }
+/* 内核不支持屏幕共享时的替代说明（iOS Safari 无 getDisplayMedia）。 */
+.screen-share-unsupported { display: inline-flex; align-items: center; min-height: 25px; color: var(--text-muted); font-size: 9px; line-height: 1.2; }
 .screen-share-card-button.live { color: #0e8c76; background: color-mix(in srgb, #b6f0d5 55%, var(--surface-1)); }
 .screen-share-card-button.viewing { color: #fff; border-color: var(--accent); background: var(--accent); }
 .screen-share-settings-button { display: grid; place-items: center; width: 25px; min-width: 25px; min-height: 25px; padding: 0; color: var(--text-muted); border: 1px solid var(--border); border-radius: 50%; background: var(--surface-1); cursor: pointer; }
@@ -4514,10 +4580,10 @@ function stopWhisperTalk(): void {
 .screen-share-player-placeholder-icon { display: grid; place-items: center; width: 58px; height: 58px; color: #69d2c7; border: 1px solid rgba(105,210,199,.36); border-radius: 18px; background: rgba(105,210,199,.12); }
 .screen-share-player-placeholder strong { color: #f0f8f5; font-size: 15px; }
 .screen-share-player-placeholder > span:last-child { color: #8ea39d; font-size: 10px; line-height: 1.5; }
-.screen-share-player-exit, .screen-share-player-controls button { display: grid; place-items: center; width: 38px; height: 38px; padding: 0; color: #edf7f4; border: 1px solid rgba(255,255,255,.14); border-radius: 50%; background: rgba(8,14,14,.7); box-shadow: 0 5px 16px rgba(0,0,0,.22); backdrop-filter: blur(8px); cursor: pointer; }
+.screen-share-player-exit, .screen-share-player-controls button { display: grid; place-items: center; width: 38px; height: 38px; padding: 0; color: #edf7f4; border: 1px solid rgba(255,255,255,.14); border-radius: 50%; background: rgba(8,14,14,.7); box-shadow: 0 5px 16px rgba(0,0,0,.22); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); cursor: pointer; }
 .screen-share-player-exit { position: absolute; top: 15px; left: 15px; z-index: 3; }
 .screen-share-player-exit:hover, .screen-share-player-controls button:hover { color: #fff; border-color: rgba(105,210,199,.75); background: rgba(0,106,100,.85); }
-.screen-share-player-viewers { position: absolute; top: 15px; right: 15px; z-index: 3; display: flex; align-items: center; gap: 8px; min-height: 38px; padding: 5px 8px 5px 11px; color: #f3faf8; border: 1px solid rgba(255,255,255,.14); border-radius: 999px; background: rgba(8,14,14,.74); box-shadow: 0 5px 16px rgba(0,0,0,.22); backdrop-filter: blur(8px); }
+.screen-share-player-viewers { position: absolute; top: 15px; right: 15px; z-index: 3; display: flex; align-items: center; gap: 8px; min-height: 38px; padding: 5px 8px 5px 11px; color: #f3faf8; border: 1px solid rgba(255,255,255,.14); border-radius: 999px; background: rgba(8,14,14,.74); box-shadow: 0 5px 16px rgba(0,0,0,.22); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); }
 .screen-share-player-viewer-label { display: inline-flex; align-items: center; gap: 5px; color: #d2e2de; font-size: 10px; font-weight: 700; white-space: nowrap; }
 .screen-share-player-viewer-avatars { display: inline-flex; align-items: center; padding-left: 4px; }
 .screen-share-player-viewer-avatar { display: grid; place-items: center; width: 25px; height: 25px; margin-left: -4px; color: #fff; border: 2px solid #15211f; border-radius: 50%; font-size: 9px; font-weight: 800; box-shadow: 0 2px 7px rgba(0,0,0,.25); }
@@ -4525,7 +4591,7 @@ function stopWhisperTalk(): void {
 .screen-share-player-live i { width: 7px; height: 7px; border-radius: 50%; background: #65e48b; box-shadow: 0 0 0 4px rgba(101,228,139,.18); animation: screen-share-live-dot 1.2s ease-in-out infinite; }
 .screen-share-player-source { position: absolute; bottom: 18px; left: 18px; z-index: 3; max-width: 45%; overflow: hidden; color: #f5fbf8; font-size: 12px; font-weight: 800; text-overflow: ellipsis; text-shadow: 0 2px 8px rgba(0,0,0,.7); white-space: nowrap; }
 .screen-share-player-controls { position: absolute; right: 15px; bottom: 15px; z-index: 3; display: flex; align-items: center; gap: 9px; }
-.screen-share-player-controls label { display: inline-flex; align-items: center; gap: 8px; min-height: 38px; padding: 0 11px; color: #edf7f4; border: 1px solid rgba(255,255,255,.14); border-radius: 999px; background: rgba(8,14,14,.7); box-shadow: 0 5px 16px rgba(0,0,0,.22); backdrop-filter: blur(8px); }
+.screen-share-player-controls label { display: inline-flex; align-items: center; gap: 8px; min-height: 38px; padding: 0 11px; color: #edf7f4; border: 1px solid rgba(255,255,255,.14); border-radius: 999px; background: rgba(8,14,14,.7); box-shadow: 0 5px 16px rgba(0,0,0,.22); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); }
 .screen-share-player-controls input { width: 102px; height: 4px; accent-color: #69d2c7; cursor: pointer; }
 /* 全屏尺寸交给 UA 的 `:fullscreen { position: fixed; inset: 0 }`：刻意不写 100vw/100vh。
    实测在缩放/多屏环境下 vw/vh 会与该全屏视口不一致（同一时刻 100vw 读到的宽度大于
@@ -4538,7 +4604,7 @@ function stopWhisperTalk(): void {
 .screen-share-player:fullscreen .screen-share-player-exit,
 .screen-share-player:fullscreen .screen-share-player-controls button,
 .screen-share-player:fullscreen .screen-share-player-controls label,
-.screen-share-player:fullscreen .screen-share-player-viewers { backdrop-filter: none; background: rgba(8,14,14,.85); }
+.screen-share-player:fullscreen .screen-share-player-viewers { -webkit-backdrop-filter: none; backdrop-filter: none; background: rgba(8,14,14,.85); }
 .screen-share-player::backdrop { background: #030606; }
 @keyframes screen-share-wave { 0% { transform: scaleY(.45); opacity: .5; } 100% { transform: scaleY(1); opacity: 1; } }
 @keyframes screen-share-live-dot { 0%, 100% { opacity: .55; transform: scale(.86); } 50% { opacity: 1; transform: scale(1); } }
@@ -4554,5 +4620,130 @@ function stopWhisperTalk(): void {
   .screen-share-player-controls label { padding-inline: 9px; }
   .screen-share-player-controls input { width: 70px; }
   .screen-share-player-exit { top: 10px; left: 10px; }
+}
+
+/* ==========================================================================
+   紧凑控件的文字标签必须整行显示
+   ==========================================================================
+   CJK 的**最小内容宽度是一个字符**，所以标签所在的 flex 项只要被压缩一点点，
+   文字就会折成竖排。而这类控件的宽度恰好等于「图标 + 标签 + 内边距」，也就是
+   标签正好占满它的文字宽度 —— 于是**一个像素的字体度量差异就能翻转结果**。
+
+   实测（真实构建产物 + 真实类名，Chrome 154 / Firefox 155）：顶部栏
+   `.performance-trigger` 两个引擎都把按钮排成 ~136px，但标签拿到的宽度是
+   Chrome 44.0px / Firefox 43.1px，而「网络性能」需要约 44px —— Chrome 单行、
+   Firefox 折成两行，且**与窗口宽度无关**（1400px 下同样折行）。
+
+   `white-space: nowrap` 让标签的最小内容宽度等于它的完整文字宽度，flex 的
+   `min-width: auto` 便不会再把它压到折行；行内空间不足时由 `.breadcrumbs`
+   （自带省略号）承担收缩，而不是破坏按钮文字。
+
+   只列**模板里真正用到**的紧凑控件：`.nav-rail` / `.rail-button` /
+   `.control-dock` / `.chat-tabs` 之外的若干旧类名只剩 CSS（早期布局遗留），
+   列进来只会误导后来者。 */
+.performance-trigger,
+.disconnect-button,
+.guide-button,
+.primary-button,
+.secondary-button,
+.text-button,
+.connect-button,
+.cancel-connect-button,
+.save-button,
+.microphone-toggle,
+.microphone-header-toggle,
+.accompaniment-toggle,
+.whisper-ptt-button,
+.dock-audio-button,
+.status-button,
+.chat-tabs button,
+.send-button,
+.member-action-button,
+.member-context-menu button,
+.member-menu-submenu-trigger,
+.mobile-nav button,
+.mobile-voice-toggle,
+.mobile-more-panel button,
+.poke-banner button,
+.screen-share-card-button,
+.screen-share-settings-button,
+.screen-share-stop-button,
+.screen-share-player-exit,
+.screen-share-player-viewer-label,
+.screen-share-player-controls label,
+.favorite-toggle,
+.visitor-count,
+.visitor-count-label,
+.more-count,
+.section-counter,
+.clear-local-button,
+.crumb-muted { white-space: nowrap; }
+/* 顶部栏的动作组保持自身宽度：空间不足时让可省略的导航路径先收缩。 */
+.workspace-actions { flex: 0 0 auto; }
+/* 导航路径承担收缩：`.crumb-muted` 与图标整行不动，频道名按既有设计省略号截断，
+   极端窄宽度下直接裁掉而不是让文字折成竖排。 */
+.breadcrumbs { overflow: hidden; }
+
+/* ==========================================================================
+   跨内核样式降级（Gecko / WebKit）
+   ==========================================================================
+   样式基线是 Chrome / Edge 94+ · Firefox 102+ · Safari 15.4+，而源码里用到的
+   `color-mix()` 实际要到 Chrome 111 / Firefox 113 / Safari 16.2 才有。不支持的
+   内核会**整条声明**丢弃 —— 丢掉的若是 background 就是「透明背景」，丢掉的若是
+   outline 就是「键盘焦点看不见」。所以这里按能力补一层静态回退：
+
+   1. `color-mix()` 在 `@supports not (...)` 里换成同色系的静态透明度写法，
+      只覆盖「丢了会真的出问题」的规则：焦点轮廓、实心背景、静音/激活状态。
+      纯装饰性的 box-shadow 不回退 —— 丢了只是少一层阴影，不影响可用性。
+   2. `-webkit-backdrop-filter` 与标准属性成对写：Safari 至今只认前缀版本。
+   3. `:has()` 需要 Firefox 121+，AdminView 的选择态另有 `:focus-within` 兜底。
+   ========================================================================== */
+@supports not (color: color-mix(in srgb, red, blue)) {
+  :global(:root) {
+    --compat-accent-tint: rgba(0, 106, 100, .12);
+    --compat-danger-tint: rgba(201, 90, 84, .13);
+    --compat-surface-veil: rgba(255, 255, 255, .94);
+  }
+  :global(:root[data-theme="dark"]) {
+    --compat-accent-tint: rgba(105, 210, 199, .16);
+    --compat-danger-tint: rgba(238, 138, 130, .18);
+    --compat-surface-veil: rgba(23, 35, 33, .94);
+  }
+  @media (prefers-color-scheme: dark) {
+    :global(:root[data-theme="system"]) {
+      --compat-accent-tint: rgba(105, 210, 199, .16);
+      --compat-danger-tint: rgba(238, 138, 130, .18);
+      --compat-surface-veil: rgba(23, 35, 33, .94);
+    }
+  }
+
+  /* 键盘焦点必须始终可见：这是可访问性底线，不能用装饰性近似糊过去。 */
+  :global(button:focus-visible), :global(a:focus-visible), :global(input:focus-visible),
+  :global(select:focus-visible), :global(textarea:focus-visible) {
+    outline: 3px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .dock-switch-row input:focus-visible, .mobile-noise-toggle input:focus-visible {
+    outline: 3px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .screen-share-settings-fields select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .screen-share-stop-button:focus-visible { outline: 3px solid var(--danger); outline-offset: 2px; }
+
+  /* 半透明实心背景：丢掉会变成全透明，文字直接压在页面底色上。 */
+  .join-card { background: var(--compat-surface-veil); }
+  .mobile-nav { background: var(--compat-surface-veil); }
+  .workspace-header { background: var(--compat-surface-veil); }
+  :global(html[data-theme="dark"] .join-page .join-card) { background: var(--compat-surface-veil); }
+  .room-hero { background: linear-gradient(110deg, var(--accent), var(--surface-1) 75%); }
+  .desktop-audio-dock { background: var(--compat-accent-tint); }
+  .screen-share-card-button { background: var(--surface-1); }
+  :global(html[data-theme="dark"] .join-page .qq-join-link) { background: var(--surface-2); border-color: var(--border); }
+
+  /* 状态指示：静音 / 悬停高亮丢了会让「已静音」和「未静音」看起来一样。 */
+  .microphone-header-toggle.muted, .microphone-toggle.muted, .dock-audio-button.muted {
+    background: var(--compat-danger-tint);
+  }
+  .member-row:hover, .member-row:focus-within { background: var(--compat-accent-tint); }
 }
 </style>
